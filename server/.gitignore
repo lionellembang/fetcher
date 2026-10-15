@@ -1,0 +1,18 @@
+# Secrets & captured session — NEVER commit these
+.env
+
+# Local state (session, SQLite db) and downloaded files
+data/
+downloads/
+*.db
+*.sqlite*
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# Claude Code local config
+.claude/

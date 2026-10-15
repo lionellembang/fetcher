@@ -1,0 +1,24 @@
+{
+  "name": "downloadrecord",
+  "version": "1.0.0",
+  "description": "Finds BINUS LMS lecture recordings over the LMS HTTP API and downloads them from SharePoint.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "scan": "node -e \"require('./src/scan').runScan().then(r=>{console.log(JSON.stringify(r));process.exit(0)}).catch(e=>{console.error(e);process.exit(1)})\"",
+    "recordings": "node -e \"require('./src/recordings').downloadRecordings({sessionIds:process.argv.slice(1)}).then(r=>{console.log(JSON.stringify(r));process.exit(0)}).catch(e=>{console.error(e.message);process.exit(1)})\"",
+    "login":"node -e \"require('./src/session').getSession({force:true}).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})\"",
+    "compose:up": "docker compose -f docker/docker-compose.yml up -d --build",
+    "compose:down": "docker compose -f docker/docker-compose.yml down"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^4.22.3",
+    "playwright": "^1.63.0"
+  }
+}

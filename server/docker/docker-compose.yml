@@ -1,0 +1,22 @@
+services:
+  downloadrecord:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # Chromium (the login) needs these to run reliably in a container:
+    init: true # reap zombie Chromium child processes
+    shm_size: "1gb" # Chromium crashes with the default 64MB /dev/shm
+    env_file: ../.env
+    environment:
+      DATA_DIR: /app/data
+      DOWNLOAD_DIR: /app/downloads
+    ports:
+      - "${PORT:-3100}:${PORT:-3100}"
+    volumes:
+      - downloadrecord-data:/app/data
+      # Downloaded files land on the host so you can browse them directly.
+      - ../downloads:/app/downloads
+    restart: unless-stopped
+
+volumes:
+  downloadrecord-data:
