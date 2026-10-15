@@ -1,0 +1,13 @@
+# run output / local state (logs can be 100+ MB)
+logs/
+state/
+
+# media never goes in the repo
+*.mp4
+*.mov
+*.mkv
+*.zip
+cutted/
+
+.DS_Store
+__pycache__/
