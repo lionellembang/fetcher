@@ -7,7 +7,7 @@
  * Each stage has its own lane (one job at a time). Cut and transcribe are
  * "heavy" (CPU encode / GPU) and share a limit, HEAVY_CONCURRENCY. A stage
  * runs when its dependency is done and it has no result for the current
- * settings (params_key), or its dependency finished after it did.
+ * settings (params_key), or (index only) the transcript was redone after it.
  *
  * Failures stay failed until the next scan, a restart or a manual retry. If the
  * transcriber is down, transcribe/index go back to pending and are retried
@@ -27,10 +27,14 @@ const { UnavailableError } = require('./whisper');
 const STAGES = ['probe', 'cut', 'transcribe', 'index'];
 const DEPS = { probe: null, cut: 'probe', transcribe: 'probe', index: 'transcribe' };
 const HEAVY = new Set(['cut', 'transcribe']);
+// Stages whose input is their dependency's output: redone when the dependency is.
+// (Cut and transcribe only use the probe's loudness to decide "silent", which is
+// worked out on use; redoing them after every re-probe would waste hours.)
+const REDO_AFTER_DEP = new Set(['index']);
 const RETRY_UNAVAILABLE_MS = 60000;
 
 const PARAMS = {
-  probe: () => `v1|silent${config.silentDb}|quiet${config.quietDb}`,
+  probe: () => 'v2', // thresholds are applied on use (media.audioClass), not baked in
   cut: cut.paramsKey,
   transcribe: transcribe.paramsKey,
   index: indexer.paramsKey,
@@ -45,25 +49,17 @@ const ENABLED = {
 const RUN = {
   async probe(item) {
     const p = await media.probe(path.join(config.downloadDir, item.file_path));
-    const silent = !(p.maxVolume >= config.silentDb);
     const fin = (v) => (Number.isFinite(v) ? v : null);
-    return {
-      meta: {
-        duration: p.duration,
-        maxVolume: fin(p.maxVolume),
-        meanVolume: fin(p.meanVolume),
-        silent,
-        quiet: !silent && p.maxVolume < config.quietDb,
-      },
-    };
+    return { meta: { duration: p.duration, maxVolume: fin(p.maxVolume), meanVolume: fin(p.meanVolume) } };
   },
   async cut(item, stages) {
-    if (stages.probe.meta.silent) return { status: 'skipped', meta: { reason: 'no audio' } };
+    if (media.audioClass(stages.probe.meta).silent) return { status: 'skipped', meta: { reason: 'no audio' } };
     return cut.cutRecording(item.file_path);
   },
   async transcribe(item, stages) {
-    if (stages.probe.meta.silent) return { status: 'skipped', meta: { reason: 'no audio' } };
-    return transcribe.transcribeRecording(item, stages.probe.meta);
+    const cls = media.audioClass(stages.probe.meta);
+    if (cls.silent) return { status: 'skipped', meta: { reason: 'no audio' } };
+    return transcribe.transcribeRecording(item, { ...stages.probe.meta, ...cls });
   },
   async index(item) {
     return indexer.indexRecording(item);
@@ -90,7 +86,7 @@ function wants(stage, stages, { includeFailed }) {
   if (!s) return true;
   if (s.status === 'running') return false;
   if (s.params_key !== PARAMS[stage]()) return true; // settings changed
-  if (dep && dep.finished_at && (!s.finished_at || dep.finished_at > s.finished_at)) return true; // input changed
+  if (REDO_AFTER_DEP.has(stage) && dep.finished_at && (!s.finished_at || dep.finished_at > s.finished_at)) return true; // input changed
   if (s.status === 'pending') return true;
   if (s.status === 'failed') return includeFailed;
   return false;

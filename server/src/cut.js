@@ -17,6 +17,7 @@ const { run, tailLines, duration } = require('./media');
 const { loadTimeline, cutLength } = require('./timeline');
 
 const MIN_OUTPUT_BYTES = 100 * 1024;
+const MIN_KEPT_SEC = 10; // less than this above the threshold = nothing worth cutting
 
 class SilentError extends Error {}
 
@@ -62,6 +63,10 @@ async function cutRecording(rel) {
     // 1) Timeline first: analysis only, fast, and fails early on silent files.
     await autoEditor([src, ...edit, '--export', 'v1', '-o', tmpTimeline]);
     const spans = loadTimeline(tmpTimeline);
+    const kept = cutLength(spans);
+    if (kept < MIN_KEPT_SEC) {
+      throw new SilentError(`only ${kept.toFixed(1)}s of the recording is louder than ${config.cutEdit.replace(/^audio:/, '')}`);
+    }
 
     // 2) Render the cut video with the same settings.
     await autoEditor([src, ...edit, ...config.cutExtraArgs, '-o', tmpVideo]);
@@ -71,8 +76,8 @@ async function cutRecording(rel) {
     fs.renameSync(tmpVideo, absVideo);
     fs.renameSync(tmpTimeline, absTimeline);
 
-    const origDuration = spans.length ? await duration(src) : null;
-    const keptSec = cutLength(spans);
+    const origDuration = await duration(src);
+    const keptSec = kept;
     return {
       outputPath: out.video,
       meta: {

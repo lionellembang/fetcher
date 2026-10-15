@@ -6,6 +6,7 @@
  *   renderSearch     hybrid search across every lecture
  */
 const { origToCut, cutToOrig } = require('./timeline');
+const { audioClass } = require('./media');
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -94,7 +95,7 @@ function recCell(base, it, probe) {
   if (it.status === 'not_yet') return '<span class="muted">not yet</span>';
   const open = `<a href="${base}/recording/${encodeURIComponent(it.session_id)}" target="_blank" rel="noopener">SharePoint</a>`;
   if (it.status === 'downloaded') {
-    const flag = probe && probe.status === 'done' && probe.meta.quiet ? ' <span class="warn" title="very quiet recording">quiet</span>' : '';
+    const flag = probe && probe.status === 'done' && audioClass(probe.meta).quiet ? ' <span class="warn" title="very quiet recording">quiet</span>' : '';
     return `<a href="${filesHref(base, it.file_path)}">Recording</a> <span class="muted">${fmtSize(it.size)}${probe && probe.meta && probe.meta.duration ? ` · ${fmtMin(probe.meta.duration)}` : ''}</span>${flag} · ${open}`;
   }
   if (it.status === 'failed') return `${open} · <span class="err" title="${esc(it.error || '')}">download failed</span>`;

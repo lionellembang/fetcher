@@ -87,6 +87,17 @@ async function probe(file) {
   return { duration: dur, maxVolume: db('max_volume'), meanVolume: db('mean_volume') };
 }
 
+/**
+ * { silent, quiet } from probe() numbers (peak and average dB). Worked out on
+ * use, not stored, so changing the thresholds needs no re-probe.
+ */
+function audioClass({ maxVolume, meanVolume }) {
+  const max = maxVolume == null ? -Infinity : maxVolume;
+  const mean = meanVolume == null ? -Infinity : meanVolume;
+  const silent = max < config.silentDb || mean < config.silentMeanDb;
+  return { silent, quiet: !silent && (max < config.quietDb || mean < config.quietMeanDb) };
+}
+
 /** Write 16 kHz mono FLAC (what Whisper uses internally), optionally loudness-normalised. */
 async function extractAudio(file, out, { loudnorm = false } = {}) {
   const args = ['-v', 'error', '-y', '-i', file, '-vn', '-map', '0:a:0', '-ac', '1', '-ar', '16000'];
@@ -96,4 +107,4 @@ async function extractAudio(file, out, { loudnorm = false } = {}) {
   if (r.code !== 0) throw new Error(`ffmpeg audio extract failed: ${tailLines(r.stderr, 5)}`);
 }
 
-module.exports = { run, killAll, tailLines, duration, probe, extractAudio };
+module.exports = { run, killAll, tailLines, duration, probe, audioClass, extractAudio };

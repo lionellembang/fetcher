@@ -1,13 +1,22 @@
 """Minimal HTTP server around OpenAI Whisper, plus text embeddings for search.
 
-POST /transcribe   multipart: file=<audio/video>, optional form fields:
-                   language, task (transcribe|translate), model, format (json|text|srt|vtt)
+POST /jobs         multipart: file=<audio/video>, key, optional language, task, model,
+                   vad, gate_db -> {id, status}. Queues a transcription and returns at
+                   once; a job with the same key that is queued, running or done is
+                   returned instead of starting another.
+GET  /jobs/{id}    -> {id, status: queued|running|done|failed, result (when done), error}
+POST /transcribe   multipart, same fields plus format (json|text|srt|vtt); waits for the
+                   result in the same request (fine for short files and transcribe.sh)
 POST /embed        JSON {texts: [...], kind: "query"|"passage"} -> normalised vectors
 GET  /health
 """
 import os
+import queue
+import shutil
 import tempfile
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,6 +40,11 @@ _lock = threading.Lock()  # one GPU job at a time
 _vad = load_silero_vad()
 _embedder = None
 _embed_lock = threading.Lock()  # separate from _lock: search works while a transcription runs
+
+JOB_KEEP_S = 2 * 3600  # finished jobs (and their results) are forgotten after this
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+_job_queue: queue.Queue = queue.Queue()
 
 SAMPLE_RATE = 16000
 MERGE_GAP_S = 2.0  # merge speech regions separated by less than this
@@ -83,9 +97,58 @@ def get_embedder():
     return _embedder
 
 
+def run_transcription(src: Path, language, task, model, vad, gate_db) -> dict:
+    """Whisper result for an audio/video file. Raises RuntimeError if it can't be decoded."""
+    with _lock:
+        audio = whisper.load_audio(str(src))
+        opts = dict(
+            language=language, task=task, fp16=(DEVICE == "cuda"),
+            condition_on_previous_text=False,  # stops one bad segment poisoning the rest
+        )
+        if vad:
+            clips = speech_clips(audio, gate_db)
+            if not clips:
+                result = {"text": "", "segments": [], "language": language}
+            else:
+                result = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
+        else:
+            result = get_model(model).transcribe(audio, **opts)
+
+    # drop blank segments and likely no-speech hallucinations
+    result["segments"] = [
+        sg for sg in result["segments"]
+        if sg["text"].strip() and not (sg["no_speech_prob"] > 0.6 and sg["avg_logprob"] < -1.0)
+    ]
+    return result
+
+
+def _job_worker() -> None:
+    while True:
+        job = _job_queue.get()
+        job["status"], job["started"] = "running", time.time()
+        try:
+            job["result"] = run_transcription(job["path"], **job["opts"])
+            job["status"] = "done"
+        except Exception as e:  # decode failure, CUDA error, ...
+            job["status"], job["error"] = "failed", f"{type(e).__name__}: {e}"
+        finally:
+            job["finished"] = time.time()
+            shutil.rmtree(job["dir"], ignore_errors=True)
+
+
+def _job_view(job: dict, with_result: bool = False) -> dict:
+    out = {k: job.get(k) for k in ("id", "key", "status", "error", "queued", "started", "finished")}
+    if job["status"] == "queued":
+        out["ahead"] = sum(1 for j in _jobs.values() if j["status"] in ("queued", "running") and j["queued"] < job["queued"])
+    if with_result and job["status"] == "done":
+        out["result"] = job["result"]
+    return out
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     get_model(DEFAULT_MODEL)
+    threading.Thread(target=_job_worker, name="transcribe-jobs", daemon=True).start()
     yield
 
 
@@ -100,6 +163,7 @@ def health():
         "loaded_models": list(_models),
         "embed_model": EMBED_MODEL,
         "embed_loaded": _embedder is not None,
+        "jobs": {s: sum(1 for j in _jobs.values() if j["status"] == s) for s in ("queued", "running", "done", "failed")},
     }
 
 
@@ -121,6 +185,59 @@ def embed(req: EmbedRequest):
     return {"model": EMBED_MODEL, "dim": int(vecs.shape[1]), "vectors": vecs.astype(np.float32).tolist()}
 
 
+def _check(task: str, model: str) -> None:
+    if task not in {"transcribe", "translate"}:
+        raise HTTPException(400, "task must be transcribe or translate")
+    if model not in whisper.available_models():
+        raise HTTPException(400, f"unknown model {model}")
+
+
+def _save_upload(file: UploadFile, folder: Path) -> Path:
+    src = folder / (Path(file.filename or "input").name or "input")
+    with open(src, "wb") as f:
+        while chunk := file.file.read(1 << 20):
+            f.write(chunk)
+    return src
+
+
+@app.post("/jobs")
+def create_job(
+    file: UploadFile = File(...),
+    key: str = Form(...),
+    language: str | None = Form(None),
+    task: str = Form("transcribe"),
+    model: str = Form(DEFAULT_MODEL),
+    vad: bool = Form(True),
+    gate_db: float = Form(12.0),
+):
+    _check(task, model)
+    now = time.time()
+    with _jobs_lock:
+        for jid in [j["id"] for j in _jobs.values() if j.get("finished") and now - j["finished"] > JOB_KEEP_S]:
+            del _jobs[jid]
+        for j in _jobs.values():
+            if j["key"] == key and j["status"] != "failed":
+                return _job_view(j)  # already queued / running / done
+    folder = Path(tempfile.mkdtemp(prefix="transcribe-job-"))
+    job = {
+        "id": uuid.uuid4().hex, "key": key, "status": "queued", "queued": now, "dir": folder,
+        "path": _save_upload(file, folder),
+        "opts": dict(language=language, task=task, model=model, vad=vad, gate_db=gate_db),
+    }
+    with _jobs_lock:
+        _jobs[job["id"]] = job
+    _job_queue.put(job)
+    return _job_view(job)
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job (finished long ago, or the server restarted)")
+    return _job_view(job, with_result=True)
+
+
 @app.post("/transcribe")
 def transcribe(
     file: UploadFile = File(...),
@@ -133,38 +250,14 @@ def transcribe(
 ):
     if format not in {"json", "text", "srt", "vtt"}:
         raise HTTPException(400, "format must be json, text, srt or vtt")
-    if task not in {"transcribe", "translate"}:
-        raise HTTPException(400, "task must be transcribe or translate")
+    _check(task, model)
 
     with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / (Path(file.filename or "input").name or "input")
-        with open(src, "wb") as f:
-            while chunk := file.file.read(1 << 20):
-                f.write(chunk)
-
-        with _lock:
-            try:
-                audio = whisper.load_audio(str(src))
-                opts = dict(
-                    language=language, task=task, fp16=(DEVICE == "cuda"),
-                    condition_on_previous_text=False,  # stops one bad segment poisoning the rest
-                )
-                if vad:
-                    clips = speech_clips(audio, gate_db)
-                    if not clips:
-                        result = {"text": "", "segments": [], "language": language}
-                    else:
-                        result = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
-                else:
-                    result = get_model(model).transcribe(audio, **opts)
-            except RuntimeError as e:  # ffmpeg decode failure, etc.
-                raise HTTPException(422, str(e))
-
-        # drop blank segments and likely no-speech hallucinations
-        result["segments"] = [
-            sg for sg in result["segments"]
-            if sg["text"].strip() and not (sg["no_speech_prob"] > 0.6 and sg["avg_logprob"] < -1.0)
-        ]
+        src = _save_upload(file, Path(tmp))
+        try:
+            result = run_transcription(src, language, task, model, vad, gate_db)
+        except RuntimeError as e:  # ffmpeg decode failure, etc.
+            raise HTTPException(422, str(e))
 
         if format == "json":
             return result

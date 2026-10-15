@@ -11,15 +11,22 @@
  *         the SharePoint cookies carry over to the rest of the batch)
  *       → lands on the player (stream.aspx?id=<server-relative file path>)
  *     → file name + size from SharePoint's REST API (same cookies)
- *     → Playwright download of <site>/_layouts/15/download.aspx?SourceUrl=<path>,
- *       falling back to the share link with download=1
- *     → <file>.part, size check, rename
+ *     → plain HTTP download of the file with the browser's SharePoint cookies,
+ *       into <file>.part. A broken transfer resumes where it stopped (HTTP
+ *       Range), up to HTTP_ATTEMPTS times; a stall of STALL_MS counts as broken.
+ *     → size check, rename
+ *   If SharePoint won't serve the file to plain HTTP (401/403 or a sign-in
+ *   page), it falls back to a Playwright browser download of
+ *   <site>/_layouts/15/download.aspx?SourceUrl=<path> (or the share link with
+ *   download=1), which can't resume.
  *
  * A failed recording is marked `failed` and retried on the next run. A failed
  * sign-in stops the batch without touching any item.
  */
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const config = require('./config');
 const lms = require('./lms');
 const store = require('./store');
@@ -28,10 +35,13 @@ const { launchColdBrowser, shutdownBrowser, withTimeout } = require('./browser')
 const { doMicrosoftLogin } = require('./login');
 
 const NAV_TIMEOUT_MS = 60000;
+const HTTP_ATTEMPTS = 6;
+const STALL_MS = 90000;
 const DOWNLOAD_START_TIMEOUT_MS = 60000;
 const VIDEO_PATH_RE = /\/(?:sites|teams)\/[^"'<>?#\\]+?\.(?:mp4|m4a|mov|mkv|webm)/i;
 
 class SignInError extends Error {}
+class NotServedError extends Error {} // SharePoint won't hand the file to plain HTTP
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -134,12 +144,116 @@ async function downloadOne(page, item) {
     safeName(`${item.course_code} ${item.component} S${nn} recording${ext}`)
   );
 
-  const download = await startFirstDownload(page, [
-    `${file.origin}${file.sitePath}/_layouts/15/download.aspx?SourceUrl=${encodeURIComponent(file.path)}`,
-    withParam(rec.recordingUrl, 'download', '1'),
-  ]);
+  const downloadAspx = `${file.origin}${file.sitePath}/_layouts/15/download.aspx?SourceUrl=${encodeURIComponent(file.path)}`;
+  try {
+    const size = await httpDownload(page, [`${file.origin}${encodeURI(file.path)}`, downloadAspx], rel, info && info.size);
+    return { rel, size };
+  } catch (err) {
+    if (!(err instanceof NotServedError)) throw err;
+    console.log(`  … plain HTTP download refused (${err.message}); using a browser download`);
+  }
+  const download = await startFirstDownload(page, [downloadAspx, withParam(rec.recordingUrl, 'download', '1')]);
   const size = await saveDownload(download, rel, info && info.size);
   return { rel, size };
+}
+
+/**
+ * Download with the browser's SharePoint cookies over plain HTTP into
+ * <file>.part, resuming after a broken or stalled transfer. Tries each URL
+ * until one serves the file. Returns the size. Throws NotServedError if none
+ * will serve it without a browser.
+ */
+async function httpDownload(page, urls, rel, expectedSize, { retryBaseMs = 5000 } = {}) {
+  const dest = resolveDest(rel);
+  const part = `${dest}.part`;
+  const deadline = Date.now() + Math.max(1, config.recordingTimeoutMin) * 60000;
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  const origin = new URL(urls[0]).origin;
+  fs.rmSync(part, { force: true });
+
+  let url = null; // the URL that served the file; later attempts resume from it
+  let lastErr;
+  for (let attempt = 1; attempt <= HTTP_ATTEMPTS; attempt++) {
+    if (Date.now() > deadline) throw new Error(`download took longer than ${config.recordingTimeoutMin} min`);
+    const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
+    if (attempt > 1) {
+      console.log(`  … resuming at ${have} B (attempt ${attempt}/${HTTP_ATTEMPTS}): ${lastErr.message}`);
+      await sleep(retryBaseMs * attempt);
+    }
+    const cookie = (await page.context().cookies(origin)).map((c) => `${c.name}=${c.value}`).join('; ');
+    try {
+      if (url) {
+        await fetchInto(url, part, have, { cookie, 'user-agent': userAgent }, deadline);
+      } else {
+        const refused = [];
+        for (const u of urls) {
+          try {
+            await fetchInto(u, part, 0, { cookie, 'user-agent': userAgent }, deadline);
+            url = u;
+            break;
+          } catch (err) {
+            if (!(err instanceof NotServedError)) {
+              url = u; // it served the file, then broke: resume from here
+              throw err;
+            }
+            refused.push(`${new URL(u).pathname.split('/').pop()}: ${err.message}`);
+          }
+        }
+        if (!url) throw new NotServedError(refused.join('; '));
+      }
+    } catch (err) {
+      if (err instanceof NotServedError) {
+        fs.rmSync(part, { force: true });
+        throw err;
+      }
+      lastErr = err;
+      continue;
+    }
+    const size = fs.statSync(part).size;
+    if (expectedSize && size !== expectedSize) {
+      lastErr = new Error(`transfer ended early: ${size} of ${expectedSize} bytes`);
+      continue;
+    }
+    fs.renameSync(part, dest);
+    if (attempt > 1) console.log(`  … completed after ${attempt} attempts`);
+    return size;
+  }
+  fs.rmSync(part, { force: true });
+  throw new Error(`download kept breaking off after ${HTTP_ATTEMPTS} attempts (last: ${lastErr.message})`);
+}
+
+/**
+ * GET `url` into `part`, from byte `offset` (HTTP Range) when it's > 0. If the
+ * server ignores the range, the file is restarted. Aborts after STALL_MS with
+ * no data.
+ */
+async function fetchInto(url, part, offset, headers, deadline) {
+  const ac = new AbortController();
+  let stall;
+  const bump = () => {
+    clearTimeout(stall);
+    stall = setTimeout(() => ac.abort(new Error(`no data for ${STALL_MS / 1000}s`)), STALL_MS);
+  };
+  const overall = setTimeout(() => ac.abort(new Error('past RECORDING_TIMEOUT_MIN')), Math.max(0, deadline - Date.now()));
+  bump();
+  try {
+    const res = await fetch(url, { headers: offset ? { ...headers, range: `bytes=${offset}-` } : headers, signal: ac.signal });
+    if (res.status === 401 || res.status === 403 || res.status === 404) throw new NotServedError(`HTTP ${res.status}`);
+    if (res.status === 416 && offset) return; // already complete
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (/text\/html/i.test(res.headers.get('content-type') || '')) throw new NotServedError('got a web page (sign-in?) instead of the file');
+    const append = offset > 0 && res.status === 206;
+    const body = Readable.fromWeb(res.body);
+    body.on('data', bump);
+    await pipeline(body, fs.createWriteStream(part, { flags: append ? 'a' : 'w' }));
+  } catch (err) {
+    if (err instanceof NotServedError) throw err;
+    const reason = ac.signal.aborted && ac.signal.reason ? ac.signal.reason.message : err.cause ? `${err.message} (${err.cause.code || err.cause.message})` : err.message;
+    throw new Error(reason);
+  } finally {
+    clearTimeout(stall);
+    clearTimeout(overall);
+  }
 }
 
 /**
@@ -273,4 +387,4 @@ function withParam(url, key, value) {
   return u.toString();
 }
 
-module.exports = { downloadRecordings };
+module.exports = { downloadRecordings, httpDownload, NotServedError };

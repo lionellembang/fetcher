@@ -73,9 +73,14 @@ const config = {
   // Pipeline: at most this many cut + transcribe jobs at once (1 = never overlap them).
   heavyConcurrency: Math.max(1, int(process.env.HEAVY_CONCURRENCY, 2)),
 
-  // Probe: below SILENT_DB peak = no audio (skip cut + transcribe); below QUIET_DB = flagged quiet.
+  // Probe: a peak below SILENT_DB, or an average below SILENT_MEAN_DB (e.g. silence
+  // plus one click), = no audio: cut + transcribe are skipped. A peak below QUIET_DB
+  // or an average below QUIET_MEAN_DB = quiet (loudness-normalised before Whisper).
+  // Normal lectures average about -25 dB; a very quiet one about -48 dB.
   silentDb: num(process.env.SILENT_DB, -60),
+  silentMeanDb: num(process.env.SILENT_MEAN_DB, -55),
   quietDb: num(process.env.QUIET_DB, -20),
+  quietMeanDb: num(process.env.QUIET_MEAN_DB, -40),
 
   // Cut (auto-editor), tuned in the cutting repo's run 2
   cutEnabled: bool(process.env.CUT_ENABLED, true),

@@ -32,15 +32,21 @@ async function transcribeRecording(item, probeMeta) {
     const loudnorm = useLoudnorm(probeMeta);
     await extractAudio(src, audio, { loudnorm });
 
-    // ~5× real time on the GPU; give up if it's slower than 2× real time (min 10 min).
+    // The job can wait behind others the transcriber is already running (e.g. from
+    // before a restart of this server), so allow 2× real time plus an hour.
     const dur = (probeMeta && probeMeta.duration) || 3600;
-    const timeoutMs = Math.max(10 * 60, dur * 0.5) * 1000;
+    const timeoutMs = (dur * 2 + 3600) * 1000;
     const started = Date.now();
-    const result = await whisper.transcribe(audio, {
+    const job = await whisper.submitJob(audio, {
+      key: `${item.id}|${paramsKey()}|${loudnorm}`,
       language: config.transcribeLang,
       model: config.transcribeModel,
       gateDb: config.transcribeGateDb,
+    });
+    const result = await whisper.waitJob(job.id, {
       timeoutMs,
+      onProgress: (j) =>
+        console.log(`  … transcribe ${item.course_code} S${item.session_number}: ${j.status}${j.ahead ? ` (${j.ahead} ahead)` : ''}`),
     });
 
     const segments = (result.segments || [])
