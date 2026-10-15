@@ -1,0 +1,9 @@
+# environment (recreate from requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# runtime data
+logs/
+output/
+*.log

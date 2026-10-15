@@ -1,0 +1,13 @@
+# Python 3.12. Install with:
+#   uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+# torch from PyPI ships CUDA 13 wheels, which work on the RTX 5070 (sm_120).
+# Whisper needs ffmpeg on PATH; without sudo, link the bundled one:
+#   ln -s "$(.venv/bin/python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())")" .venv/bin/ffmpeg
+torch==2.14.1
+openai-whisper==20250625
+silero-vad==6.2.3
+numpy==2.5.3
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+imageio-ffmpeg==0.6.0
