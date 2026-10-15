@@ -2,3 +2,7 @@ node_modules/
 .env
 logs/
 *.log
+
+# runtime data (relative DATA_DIR / DOWNLOAD_DIR)
+/data/
+/downloads/

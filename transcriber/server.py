@@ -1,12 +1,14 @@
-"""Minimal HTTP server around OpenAI Whisper.
+"""Minimal HTTP server around OpenAI Whisper, plus text embeddings for search.
 
 POST /transcribe   multipart: file=<audio/video>, optional form fields:
                    language, task (transcribe|translate), model, format (json|text|srt|vtt)
+POST /embed        JSON {texts: [...], kind: "query"|"passage"} -> normalised vectors
 GET  /health
 """
 import os
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
@@ -14,16 +16,21 @@ import torch
 import whisper
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from silero_vad import get_speech_timestamps, load_silero_vad
 from whisper.utils import get_writer
 
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "turbo")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Embeddings run on the CPU: large-v3 already fills ~11.6 of the GPU's 12 GB.
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-base")
+EMBED_MAX_TEXTS = 256
 
-app = FastAPI(title="Whisper server")
 _models: dict[str, whisper.Whisper] = {}
 _lock = threading.Lock()  # one GPU job at a time
 _vad = load_silero_vad()
+_embedder = None
+_embed_lock = threading.Lock()  # separate from _lock: search works while a transcription runs
 
 SAMPLE_RATE = 16000
 MERGE_GAP_S = 2.0  # merge speech regions separated by less than this
@@ -66,14 +73,52 @@ def get_model(name: str) -> whisper.Whisper:
     return _models[name]
 
 
-@app.on_event("startup")
-def preload() -> None:
+def get_embedder():
+    """Load the embedding model on first use, so it costs no RAM until search is used."""
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+
+        _embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
+    return _embedder
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     get_model(DEFAULT_MODEL)
+    yield
+
+
+app = FastAPI(title="Whisper server", lifespan=lifespan)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "device": DEVICE, "loaded_models": list(_models)}
+    return {
+        "status": "ok",
+        "device": DEVICE,
+        "loaded_models": list(_models),
+        "embed_model": EMBED_MODEL,
+        "embed_loaded": _embedder is not None,
+    }
+
+
+class EmbedRequest(BaseModel):
+    texts: list[str]
+    kind: str = "passage"
+
+
+@app.post("/embed")
+def embed(req: EmbedRequest):
+    """Normalised embeddings. e5 models expect a "query: " / "passage: " prefix, added here."""
+    if req.kind not in {"query", "passage"}:
+        raise HTTPException(400, "kind must be query or passage")
+    if not req.texts or len(req.texts) > EMBED_MAX_TEXTS:
+        raise HTTPException(400, f"send 1-{EMBED_MAX_TEXTS} texts")
+    texts = [f"{req.kind}: {t}" for t in req.texts] if "e5" in EMBED_MODEL else req.texts
+    with _embed_lock:
+        vecs = get_embedder().encode(texts, normalize_embeddings=True, batch_size=32, convert_to_numpy=True)
+    return {"model": EMBED_MODEL, "dim": int(vecs.shape[1]), "vectors": vecs.astype(np.float32).tolist()}
 
 
 @app.post("/transcribe")

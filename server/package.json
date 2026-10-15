@@ -1,15 +1,17 @@
 {
-  "name": "downloadrecord",
-  "version": "1.0.0",
-  "description": "Finds BINUS LMS lecture recordings over the LMS HTTP API and downloads them from SharePoint.",
+  "name": "fetcher-server",
+  "version": "2.0.0",
+  "description": "Finds BINUS LMS lecture recordings, downloads them from SharePoint, silence-cuts and transcribes them, and serves a dashboard + MCP.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "scan": "node -e \"require('./src/scan').runScan().then(r=>{console.log(JSON.stringify(r));process.exit(0)}).catch(e=>{console.error(e);process.exit(1)})\"",
     "recordings": "node -e \"require('./src/recordings').downloadRecordings({sessionIds:process.argv.slice(1)}).then(r=>{console.log(JSON.stringify(r));process.exit(0)}).catch(e=>{console.error(e.message);process.exit(1)})\"",
-    "login":"node -e \"require('./src/session').getSession({force:true}).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})\"",
+    "pipeline": "node -e \"const p=require('./src/pipeline');const ids=process.argv.slice(1);p.start({sweepAll:!ids.length});for(const id of ids)p.runItem('recording:'+id);p.waitIdle().then(()=>{console.log(JSON.stringify(p.status()));process.exit(0)}).catch(e=>{console.error(e.message);process.exit(1)})\"",
+    "login": "node -e \"require('./src/session').getSession({force:true}).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})\"",
     "compose:up": "docker compose -f docker/docker-compose.yml up -d --build",
-    "compose:down": "docker compose -f docker/docker-compose.yml down"
+    "compose:down": "docker compose -f docker/docker-compose.yml down",
+    "test": "node --test test/*.test.js"
   },
   "license": "ISC",
   "type": "commonjs",
@@ -17,8 +19,10 @@
     "node": ">=24"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^16.6.1",
     "express": "^4.22.3",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "zod": "^4.6.7"
   }
 }

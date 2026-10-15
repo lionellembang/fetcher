@@ -1,5 +1,10 @@
 # downloadrecord — BINUS LMS lecture recordings
 
+> Part of **fetcher**: this is the server (scan, download, pipeline, dashboard,
+> MCP). Setup, running, and the cut/transcribe/search pipeline are described in
+> the [top-level README](../README.md); this file documents the LMS and
+> SharePoint side. Config now lives in the repo-root `.env`.
+
 A small server that downloads the lecture recordings of your BINUS LMS classes
 (Zoom, onsite *and* online). New recordings are detected as soon as they appear
 and **downloaded from SharePoint** with Playwright. The dashboard also has an

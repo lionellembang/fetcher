@@ -23,6 +23,7 @@ const path = require('path');
 const config = require('./config');
 const lms = require('./lms');
 const store = require('./store');
+const events = require('./events');
 const { launchColdBrowser, shutdownBrowser, withTimeout } = require('./browser');
 const { doMicrosoftLogin } = require('./login');
 
@@ -97,6 +98,7 @@ async function downloadRecordings({ sessionIds } = {}) {
       try {
         const { rel, size } = await downloadOne(page, item);
         store.markDownloaded(item.id, rel, size);
+        events.emit('downloaded', item.id); // → pipeline (probe, cut, transcribe, index)
         summary.downloaded++;
         console.log(`  ↓ ${rel} (${size} B)`);
       } catch (err) {

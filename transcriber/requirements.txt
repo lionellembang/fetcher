@@ -11,3 +11,6 @@ fastapi==0.143.0
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 imageio-ffmpeg==0.6.0
+# /embed (search). Do not install torchaudio: transformers imports it if present,
+# and the PyPI build doesn't match the CUDA 13 torch.
+sentence-transformers==6.1.0

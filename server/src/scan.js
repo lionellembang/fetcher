@@ -1,6 +1,7 @@
 /**
  * One scan: walk period → components → classes → sessions over the LMS API,
- * record every recording, then download the ones that aren't on disk yet.
+ * record every recording, then download the ones that aren't on disk yet, and
+ * queue pipeline work (including retries of failed stages).
  *
  * Only sessions that had a Zoom meeting can have a recording. A 404 from the
  * recording endpoint means "not ready yet" (they appear some days after class),
@@ -12,6 +13,7 @@ const config = require('./config');
 const lms = require('./lms');
 const store = require('./store');
 const { downloadRecordings } = require('./recordings');
+const pipeline = require('./pipeline');
 
 let running = null;
 
@@ -51,6 +53,7 @@ async function scan() {
     }
   }
 
+  pipeline.sweep({ includeFailed: true });
   store.setMeta('last_scan', new Date().toISOString());
   summary.ms = Date.now() - startedAt;
   console.log(`✓ scan done in ${summary.ms}ms: ${JSON.stringify(summary)}`);

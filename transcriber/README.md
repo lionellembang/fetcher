@@ -1,5 +1,8 @@
 # Lecture transcription server
 
+> Part of **fetcher**: `scripts/start.sh` starts this server for the pipeline,
+> which sends 16 kHz FLAC of each recording and also uses `/embed` for search.
+
 A local HTTP server that turns lecture recordings into subtitles with OpenAI Whisper `large-v3` on an NVIDIA GPU. It skips silence and quiet background chatter before transcribing, which stops Whisper from inventing text on non-speech.
 
 Built for Indonesian university lectures (with English technical terms) on WSL2, but it accepts any audio or video file that ffmpeg can decode.
@@ -23,7 +26,7 @@ until curl -sf -m 2 localhost:8000/health; do sleep 3; done
 ./transcribe.sh -l id "lecture.mp4"     # writes output/subtitles/lecture.srt
 ```
 
-The default model in `run.sh` is `turbo`; set `WHISPER_MODEL=large-v3` for the best accuracy.
+The default model in `run.sh` is `large-v3`; set `WHISPER_MODEL=turbo` for speed. `VENV` picks the Python environment (default `./.venv`).
 
 ## Repository layout
 
@@ -64,9 +67,11 @@ pkill -f "[t]ranscribe.sh"; pkill -f "[c]url -sf --max-time"; pkill -f "[u]vicor
 
 ## API
 
-Two endpoints, no authentication, on `0.0.0.0:8000` by default (set `HOST=127.0.0.1` to keep it local).
+Three endpoints, no authentication, on `127.0.0.1:8000` by default (set `HOST=0.0.0.0` to expose it).
 
-**`GET /health`** returns `{"status":"ok","device":"cuda","loaded_models":["large-v3"]}` once the model has loaded.
+**`GET /health`** returns `{"status":"ok","device":"cuda","loaded_models":["large-v3"],"embed_model":"…","embed_loaded":false}` once the model has loaded.
+
+**`POST /embed`** takes JSON `{"texts": [...], "kind": "query"|"passage"}` (1–256 texts) and returns `{"model", "dim", "vectors"}`, normalised. The model (`EMBED_MODEL`, default `intfloat/multilingual-e5-base`) runs on the CPU because large-v3 fills the GPU, loads on first use, and has its own lock, so it answers while a transcription runs. e5's `query: `/`passage: ` prefixes are added for you.
 
 **`POST /transcribe`** takes `multipart/form-data`:
 
