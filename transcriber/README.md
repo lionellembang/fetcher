@@ -67,13 +67,15 @@ pkill -f "[t]ranscribe.sh"; pkill -f "[c]url -sf --max-time"; pkill -f "[u]vicor
 
 ## API
 
-Three endpoints, no authentication, on `127.0.0.1:8000` by default (set `HOST=0.0.0.0` to expose it).
+No authentication, on `127.0.0.1:8000` by default (set `HOST=0.0.0.0` to expose it).
+
+**`POST /jobs`** takes the same multipart fields as `/transcribe` (minus `format`) plus a `key`, queues the work and returns `{id, status}` at once. A job with the same `key` that is queued, running or done is returned instead of starting another, so a client can resubmit safely. **`GET /jobs/{id}`** returns `{status: queued|running|done|failed, ahead, error}` and, when done, `result` (the JSON below). Jobs live in memory for 2 h after finishing and are lost on restart (`404`). The pipeline uses this, because a lecture takes ~20 min and a single HTTP request that long hits client timeouts.
 
 **`GET /health`** returns `{"status":"ok","device":"cuda","loaded_models":["large-v3"],"embed_model":"…","embed_loaded":false}` once the model has loaded.
 
 **`POST /embed`** takes JSON `{"texts": [...], "kind": "query"|"passage"}` (1–256 texts) and returns `{"model", "dim", "vectors"}`, normalised. The model (`EMBED_MODEL`, default `intfloat/multilingual-e5-base`) runs on the CPU because large-v3 fills the GPU, loads on first use, and has its own lock, so it answers while a transcription runs. e5's `query: `/`passage: ` prefixes are added for you.
 
-**`POST /transcribe`** takes `multipart/form-data`:
+**`POST /transcribe`** (waits for the result in the same request; fine for short files and `transcribe.sh`) takes `multipart/form-data`:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |

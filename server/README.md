@@ -3,7 +3,9 @@
 > Part of **fetcher**: this is the server (scan, download, pipeline, dashboard,
 > MCP). Setup, running, and the cut/transcribe/search pipeline are described in
 > the [top-level README](../README.md); this file documents the LMS and
-> SharePoint side. Config now lives in the repo-root `.env`.
+> SharePoint side. Config now lives in the repo-root `.env`. Downloads now go
+> over plain HTTP with the browser's SharePoint cookies and resume after a
+> broken transfer; the browser download below is the fallback.
 
 A small server that downloads the lecture recordings of your BINUS LMS classes
 (Zoom, onsite *and* online). New recordings are detected as soon as they appear

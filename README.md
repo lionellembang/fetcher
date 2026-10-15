@@ -118,9 +118,10 @@ transcripts and watch the recordings. Treat it like a password; changing
 
 ## How it works
 
-**Scan and download** (`server/src/scan.js`, `recordings.js`): unchanged from
-downloadrecord. See [server/README.md](server/README.md) for the LMS API and the
-SharePoint download.
+**Scan and download** (`server/src/scan.js`, `recordings.js`): see
+[server/README.md](server/README.md) for the LMS API and SharePoint sign-in. After
+the browser signs in, files are downloaded over plain HTTP with its cookies, and
+a broken or stalled transfer resumes where it stopped (up to 6 attempts).
 
 **Pipeline** (`server/src/pipeline.js`): each downloaded recording goes through
 four steps, each with its own queue. Cut and transcribe can run at the same time
@@ -128,14 +129,15 @@ four steps, each with its own queue. Cut and transcribe can run at the same time
 
 | Step | What | Output |
 |---|---|---|
-| probe | ffmpeg `volumedetect` + duration. Peak below −60 dB = no audio: cut and transcribe are skipped. Below −20 dB = "quiet" | stage meta |
-| cut | auto-editor `--edit audio:-30dB --margin 0.3s,0.5s` (the tuned settings from `cutting/`), plus `--export v1` for the kept-spans timeline. "Timeline is empty" = skipped | `…/cutted/<name> cutted.mp4` + `.timeline.json` |
-| transcribe | 16 kHz mono FLAC of the **original** (loudness-normalised if quiet) → Whisper with VAD + loudness gate | segments in SQLite (+ FTS5) |
+| probe | ffmpeg `volumedetect` + duration. Peak below −60 dB or average below −55 dB = no audio: cut and transcribe are skipped. Peak below −20 dB or average below −40 dB = "quiet" | stage meta |
+| cut | auto-editor `--edit audio:-30dB --margin 0.3s,0.5s` (the tuned settings from `cutting/`), plus `--export v1` for the kept-spans timeline. Under 10 s kept = skipped | `…/cutted/<name> cutted.mp4` + `.timeline.json` |
+| transcribe | 16 kHz mono FLAC of the **original** (loudness-normalised if quiet) → a job on the transcriber (Whisper with VAD + loudness gate), polled until done | segments in SQLite (+ FTS5) |
 | index | ~45 s overlapping windows of segments → `multilingual-e5-base` embeddings | chunks in SQLite |
 
 Every step records the settings it ran with. Change a setting (say `CUT_MARGIN`)
-and that step is redone for every recording on the next start; steps after it
-redo too. Failed steps are retried on the next scan or restart, or with **Redo**.
+and that step is redone for every recording on the next start. A redone
+transcript also redoes its search index; the loudness thresholds are applied on
+use, so changing them redoes nothing. Failed steps are retried on the next scan or restart, or with **Redo**.
 If the transcriber is down, transcribe and index wait and retry every minute.
 
 **Timestamps**: transcripts are stored once, on the original's timeline. The cut's
