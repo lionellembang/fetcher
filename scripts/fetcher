@@ -108,7 +108,7 @@ start_one() {
   sleep 1
   if ! running "$s"; then echo "$s: exited right away; last lines of $LOGS/$s.log:"; tail -n 15 "$LOGS/$s.log"; rm -f "$(pidfile "$s")"; return 1; fi
   if [ "$s" = transcriber ]; then
-    printf "transcriber: loading the model "
+    printf "transcriber: starting "
     until transcriber_up; do
       running transcriber || { echo; echo "transcriber: exited; see $LOGS/transcriber.log"; tail -n 15 "$LOGS/transcriber.log"; return 1; }
       printf "."; sleep 3

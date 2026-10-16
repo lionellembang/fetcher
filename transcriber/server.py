@@ -10,7 +10,12 @@ POST /transcribe   multipart, same fields plus format (json|text|srt|vtt); waits
                    result in the same request (fine for short files and transcribe.sh)
 POST /embed        JSON {texts: [...], kind: "query"|"passage"} -> normalised vectors
 GET  /health
+
+Whisper is loaded when a transcription starts and unloaded again once none has
+run for WHISPER_KEEP_S seconds (default 120), so it only holds VRAM (~3.8 GB for
+large-v3) while there is work. The CUDA context (~200 MB) stays once created.
 """
+import gc
 import os
 import queue
 import shutil
@@ -41,7 +46,9 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-base")
 EMBED_MAX_TEXTS = 256
 
 _models: dict[str, WhisperModel] = {}
-_lock = threading.Lock()  # one GPU job at a time
+_lock = threading.Lock()  # one GPU job at a time; also guards loading/unloading _models
+WHISPER_KEEP_S = float(os.environ.get("WHISPER_KEEP_S", "120"))
+_last_used = 0.0  # when a transcription last finished
 _vad = load_silero_vad()
 _embedder = None
 _embed_lock = threading.Lock()  # separate from _lock: search works while a transcription runs
@@ -124,11 +131,28 @@ def _guard_against_loops(model: WhisperModel) -> None:
 
 
 def get_model(name: str) -> WhisperModel:
+    """The model, loaded if it isn't. Call with _lock held."""
     if name not in _models:
+        t = time.time()
         model = WhisperModel(name, device=DEVICE, compute_type=COMPUTE_TYPE)
         _guard_against_loops(model)
         _models[name] = model
+        print(f"Loaded Whisper {name} in {time.time() - t:.1f}s", flush=True)
     return _models[name]
+
+
+def unload_idle_models() -> None:
+    """Free the VRAM of models no transcription has used for WHISPER_KEEP_S."""
+    if not _models or time.time() - _last_used < WHISPER_KEEP_S or not _lock.acquire(blocking=False):
+        return
+    try:
+        for name, model in list(_models.items()):
+            model.model.unload_model()  # frees the weights now, not whenever gc gets to them
+            del _models[name]
+            print(f"Unloaded Whisper {name} (idle {WHISPER_KEEP_S:.0f}s)", flush=True)
+        gc.collect()
+    finally:
+        _lock.release()
 
 
 class SentencePieceE5:
@@ -185,27 +209,34 @@ def get_embedder():
     return _embedder
 
 
+def _whisper(src: Path, language, task, model, vad, gate_db) -> dict:
+    audio = whisper.load_audio(str(src))
+    opts = dict(
+        language=language, task=task, beam_size=1, temperature=TEMPERATURES,
+        condition_on_previous_text=False,  # stops one bad segment poisoning the rest
+        vad_filter=False,  # we choose the speech ourselves (speech_clips)
+    )
+    clips = speech_clips(audio, gate_db) if vad else "0"
+    if not clips:
+        return {"text": "", "segments": [], "language": language}
+    segments, info = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
+    segs = [
+        {"id": s.id, "start": s.start, "end": s.end, "text": s.text, "avg_logprob": s.avg_logprob,
+         "no_speech_prob": s.no_speech_prob, "compression_ratio": s.compression_ratio, "temperature": s.temperature}
+        for s in segments  # a generator: the work happens here
+    ]
+    return {"text": "".join(s["text"] for s in segs), "segments": segs, "language": info.language}
+
+
 def run_transcription(src: Path, language, task, model, vad, gate_db) -> dict:
     """Whisper result ({text, language, segments[]}, openai-whisper's shape) for an
     audio/video file. Raises RuntimeError if it can't be decoded."""
+    global _last_used
     with _lock:
-        audio = whisper.load_audio(str(src))
-        opts = dict(
-            language=language, task=task, beam_size=1, temperature=TEMPERATURES,
-            condition_on_previous_text=False,  # stops one bad segment poisoning the rest
-            vad_filter=False,  # we choose the speech ourselves (speech_clips)
-        )
-        clips = speech_clips(audio, gate_db) if vad else "0"
-        if not clips:
-            result = {"text": "", "segments": [], "language": language}
-        else:
-            segments, info = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
-            segs = [
-                {"id": s.id, "start": s.start, "end": s.end, "text": s.text, "avg_logprob": s.avg_logprob,
-                 "no_speech_prob": s.no_speech_prob, "compression_ratio": s.compression_ratio, "temperature": s.temperature}
-                for s in segments  # a generator: the work happens here
-            ]
-            result = {"text": "".join(s["text"] for s in segs), "segments": segs, "language": info.language}
+        try:
+            result = _whisper(src, language, task, model, vad, gate_db)
+        finally:
+            _last_used = time.time()
 
     # drop blank segments and likely no-speech hallucinations
     result["segments"] = [
@@ -217,7 +248,11 @@ def run_transcription(src: Path, language, task, model, vad, gate_db) -> dict:
 
 def _job_worker() -> None:
     while True:
-        job = _job_queue.get()
+        try:
+            job = _job_queue.get(timeout=10)
+        except queue.Empty:
+            unload_idle_models()
+            continue
         job["status"], job["started"] = "running", time.time()
         try:
             job["result"] = run_transcription(job["path"], **job["opts"])
@@ -243,7 +278,6 @@ async def lifespan(_app: FastAPI):
     # Uploads of jobs that were queued or running when the server last stopped.
     for stale in Path(tempfile.gettempdir()).glob("transcribe-job-*"):
         shutil.rmtree(stale, ignore_errors=True)
-    get_model(DEFAULT_MODEL)
     threading.Thread(target=_job_worker, name="transcribe-jobs", daemon=True).start()
     yield
 
@@ -256,7 +290,8 @@ def health():
     return {
         "status": "ok",
         "device": DEVICE,
-        "loaded_models": list(_models),
+        "loaded_models": list(_models),  # Whisper: only while transcribing (+ WHISPER_KEEP_S)
+        "whisper_keep_s": WHISPER_KEEP_S,
         "embed_model": EMBED_MODEL,
         "embed_loaded": _embedder is not None,
         "jobs": {s: sum(1 for j in _jobs.values() if j["status"] == s) for s in ("queued", "running", "done", "failed")},
