@@ -33,6 +33,22 @@ function createApp() {
   const app = express();
   app.disable('x-powered-by');
 
+  // Log MCP traffic (and OAuth discovery probes clients make first) so connection
+  // problems are visible: method, JSON-RPC method, status, time, client. A wrong
+  // token shows as <wrong-token>; the real one is never logged.
+  app.use((req, res, next) => {
+    if (!/\/mcp\/?$|^\/\.well-known\//.test(req.path)) return next();
+    const t0 = Date.now();
+    // read the path now: routers rewrite req.path while handling the request
+    const where = req.path.replace(/^\/d\/([^/]+)/, (_, t) => (t === config.accessToken ? '/d/<token>' : '/d/<wrong-token>'));
+    res.on('finish', () => {
+      const rpc = req.body && req.body.method ? ` ${req.body.method}` : '';
+      const ua = (req.get('user-agent') || '-').slice(0, 80);
+      console.log(`MCP ${req.method} ${where}${rpc} → ${res.statusCode} (${Date.now() - t0} ms) ua="${ua}"`);
+    });
+    next();
+  });
+
   app.get('/healthz', (req, res) => {
     res.json({ ok: true, lastScan: store.getMeta('last_scan'), scanning: isScanning(), counts: store.counts() });
   });
