@@ -14,6 +14,8 @@ imageio-ffmpeg==0.6.0
 # /embed (search). Do not install torchaudio: transformers imports it if present,
 # and the PyPI build doesn't match the CUDA 13 torch.
 sentence-transformers==6.1.0
+# multilingual-e5 is tokenized with sentencepiece instead (~360 MB less RAM; same ids).
+sentencepiece==0.2.2
 # Whisper itself runs on faster-whisper (CTranslate2); openai-whisper above is kept
 # for audio loading and the SRT/VTT writers.
 faster-whisper==1.2.1

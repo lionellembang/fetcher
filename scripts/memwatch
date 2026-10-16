@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Sample the RAM each fetcher service holds and print the peaks.
+
+usage: scripts/memwatch [SECONDS]     (default: until Ctrl-C)
+       MEMWATCH_CSV=file.csv scripts/memwatch    also write every sample
+
+"Held" is what a service can't give back: anonymous memory + shared memory
+(tmpfs) + what is swapped out, for its whole cgroup (fetcher-SERVICE.scope,
+children such as ffmpeg and Chromium included). Page cache isn't counted;
+the kernel drops it when memory runs short.
+
+"WSL in use" is MemTotal - MemAvailable plus used swap: everything in the VM
+(services, VS Code, the kernel, ...) except reclaimable cache. Its peak is the
+number to size .wslconfig's memory= from.
+"""
+import glob
+import os
+import signal
+import sys
+import time
+
+INTERVAL = 0.5
+PRINT_EVERY = 10.0
+MB = 1024 * 1024
+
+
+def scopes():
+    uid = os.getuid()
+    base = f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service"
+    out = {}
+    for path in glob.glob(f"{base}/**/fetcher-*.scope", recursive=True) + glob.glob(f"{base}/**/bench-*.scope", recursive=True):
+        out[os.path.basename(path)[: -len(".scope")].removeprefix("fetcher-")] = path
+    return out
+
+
+def held(cg):
+    try:
+        stat = dict(line.split() for line in open(f"{cg}/memory.stat"))
+        swap = int(open(f"{cg}/memory.swap.current").read() or 0)
+        return int(stat["anon"]) + int(stat["shmem"]) + swap
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def wsl():
+    m = {k: int(v.split()[0]) * 1024 for k, v in (line.split(":", 1) for line in open("/proc/meminfo"))}
+    swap = m["SwapTotal"] - m["SwapFree"]
+    return {"wsl": m["MemTotal"] - m["MemAvailable"] + swap, "swap": swap, "total": m["MemTotal"]}
+
+
+def main():
+    duration = float(sys.argv[1]) if len(sys.argv) > 1 else None
+    csv = open(os.environ["MEMWATCH_CSV"], "w") if os.environ.get("MEMWATCH_CSV") else None
+    peak, peak_at, names = {}, {}, []
+    start = time.time()
+    last_print = 0.0
+    stop = []
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+    if csv:
+        csv.write("t,name,bytes\n")
+    print(f"sampling every {INTERVAL}s{f' for {duration:.0f}s' if duration else ''} (Ctrl-C to stop)", flush=True)
+    while not stop and (duration is None or time.time() - start < duration):
+        now = time.time() - start
+        sample = {n: held(cg) for n, cg in scopes().items()}
+        sample = {n: v for n, v in sample.items() if v is not None}
+        w = wsl()
+        sample["WSL in use"], sample["  of which swap"] = w["wsl"], w["swap"]
+        for n, v in sample.items():
+            if n not in names:
+                names.append(n)
+            if v > peak.get(n, -1):
+                peak[n], peak_at[n] = v, now
+            if csv:
+                csv.write(f"{now:.1f},{n},{v}\n")
+        if now - last_print >= PRINT_EVERY:
+            last_print = now
+            print(f"[{now:6.0f}s] " + "  ".join(f"{n} {v / MB:.0f}" for n, v in sample.items()) + "  (MB)", flush=True)
+        time.sleep(INTERVAL)
+    order = sorted((n for n in names if n not in ("WSL in use", "  of which swap")), key=str) + ["WSL in use", "  of which swap"]
+    print(f"\npeaks over {time.time() - start:.0f}s (MB):")
+    for n in order:
+        if n in peak:
+            print(f"  {n:<16} {peak[n] / MB:8.0f}   at {peak_at[n]:.0f}s")
+    print(f"  {'(WSL total)':<16} {w['total'] / MB:8.0f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -90,6 +90,7 @@ scripts/fetcher restart worker     # after changing scan/pipeline code
 scripts/fetcher stop [SERVICE]     # one service, or everything
 scripts/fetcher logs [SERVICE]     # follow logs (default: worker + web)
 scripts/fetcher dev                # web in the foreground, reloading on every code change
+scripts/fetcher mem [SECONDS]      # sample RAM per service; prints the peaks on Ctrl-C
 ```
 
 Services run detached, so they keep running after you close the terminal
@@ -100,6 +101,31 @@ that was running; stopping web or tunnel interrupts nothing.
 
 Logs are in `logs/` (`worker.log`, `web.log`, `transcriber.log`, `tunnel.log`),
 pid files in `run/`.
+
+### Memory
+
+`status` shows the RAM each service holds (its whole systemd scope, children
+included, page cache excluded); `mem` samples it every 0.5 s and prints peaks
+plus "WSL in use", the number to size `.wslconfig`'s `memory=` from.
+
+Measured with all 45 lectures transcribed, serving dashboard, search, MCP and
+video from 4 parallel clients (Oct 2026):
+
+| service | idle | serving |
+|---|---|---|
+| transcriber (Whisper on GPU; e5 on CPU, loaded by the first search) | 500 MB | 720 MB |
+| web | 30 MB | 135 MB |
+| worker (idle; scans are HTTP only) | 75 MB | 90 MB |
+| tunnel | 16 MB | 16 MB |
+
+Plus ~350 MB for systemd and the kernel. Processing a new lecture adds a
+download (Chromium, ~420 MB), and then a cut (auto-editor, 1 GB+ for 1080p)
+or a transcription (`HEAVY_CONCURRENCY=1` runs one at a time).
+
+What keeps it there: Node runs with a small young generation (`NODE_FLAGS`),
+glibc with `MALLOC_ARENA_MAX=2`, e5 is tokenized with sentencepiece rather than
+transformers' 360 MB tokenizer, and temp files go to `data/tmp/` on disk
+rather than `/tmp`, which is RAM on this distro.
 
 ## Use it
 

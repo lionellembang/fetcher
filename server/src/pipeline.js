@@ -242,6 +242,8 @@ function start({ sweepAll = true } = {}) {
   started = true;
   const reset = store.resetRunningStages();
   if (reset) console.log(`→ Pipeline: ${reset} interrupted stage(s) put back in the queue.`);
+  // audio extracted for transcriptions that were running when the worker last stopped
+  for (const f of fs.readdirSync(config.tmpDir)) if (f.endsWith('.flac')) fs.rmSync(path.join(config.tmpDir, f), { force: true });
   events.on('downloaded', (itemId) => sweepItem(itemId, { includeFailed: true }));
   if (sweepAll) sweep({ includeFailed: true });
 }

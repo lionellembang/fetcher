@@ -11,10 +11,16 @@
 #        scripts/fetcher status
 #        scripts/fetcher logs [SERVICE]       follow a log (default: worker + web)
 #        scripts/fetcher dev                  web in the foreground, reloading on code changes
+#        scripts/fetcher mem [SECONDS]        sample RAM per service, print the peaks (Ctrl-C to stop)
 #
 # Services run detached (they keep running after you close the terminal) with
 # pid files in run/. Stopping the worker or transcriber only redoes the work
 # that was running; stopping web or tunnel interrupts nothing.
+#
+# Each service gets its own temp folder on disk (data/tmp/SERVICE, emptied on
+# start): /tmp is RAM here, and auto-editor, ffmpeg and uploads write big files.
+# With systemd, each also runs in its own scope (fetcher-SERVICE.scope), which
+# gives per-service memory figures and lets stop clean up stray child processes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -24,15 +30,32 @@ ENV_FILE="${ENV_FILE:-.env}"
 set -a; . "$ENV_FILE"; set +a
 export PATH="$HOME/.local/bin:$PATH"
 WHISPER_URL="${WHISPER_URL:-http://127.0.0.1:8000}"
-LOGS="${LOG_DIR:-logs}"; RUN="${RUN_DIR:-run}"
+LOGS="${LOG_DIR:-logs}"; RUN="${RUN_DIR:-run}"; TMP="$(realpath -m "${DATA_DIR:-./data}")/tmp"
 mkdir -p "$LOGS" "$RUN"
 
 ALL=(transcriber worker web tunnel)   # start order; stop goes in reverse
+
+# RAM: V8 otherwise grows a 16 MB young generation and lets the heap balloon
+# while memory is free (web: ~360 MB under load vs ~145 MB with these, same
+# latency); glibc otherwise gives each busy thread its own malloc arena.
+NODE_FLAGS="${NODE_FLAGS:---max-semi-space-size=2 --max-old-space-size=256}"
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 pidfile() { echo "$RUN/$1.pid"; }
 pid_of() { local f; f="$(pidfile "$1")"; [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && cat "$f"; }
 running() { [ -n "$(pid_of "$1")" ]; }
 transcriber_up() { curl -sf -m 2 "$WHISPER_URL/health" >/dev/null; }
+scope() { echo "fetcher-$1.scope"; }
+have_scopes() { [ "${FETCHER_SCOPES:-1}" = 1 ] && systemd-run --user --scope --quiet --collect true 2>/dev/null; }
+
+# Memory a service holds (bytes): anonymous + shared (tmpfs) + swapped out, for
+# its whole cgroup (children included). Page cache isn't counted: it's reclaimable.
+cg_of() { local c; c="$(sed -n 's/^0:://p' "/proc/$1/cgroup" 2>/dev/null)"; [ -n "$c" ] && [ "${c##*/}" = "$(scope "$2")" ] && echo "/sys/fs/cgroup$c"; }
+mem_of() {
+  local cg; cg="$(cg_of "$1" "$2")" || return 1
+  awk -v sw="$(cat "$cg/memory.swap.current" 2>/dev/null || echo 0)" '$1=="anon"||$1=="shmem"{t+=$2} END{print t+sw}' "$cg/memory.stat"
+}
+fmt_mb() { awk -v b="$1" 'BEGIN{printf "%d MB", b/1048576}'; }
 
 # The command line for each service (run from $ROOT).
 cmd_for() {
@@ -43,8 +66,8 @@ cmd_for() {
       [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (set TRANSCRIBER_VENV)." >&2; return 1; }
       port="${WHISPER_URL##*:}"; port="${port%%/*}"
       echo "env VENV=$venv HOST=127.0.0.1 PORT=$port transcriber/run.sh" ;;
-    worker) echo "env -C server node worker.js" ;;
-    web)    echo "env -C server node web.js" ;;
+    worker) echo "env -C server node $NODE_FLAGS worker.js" ;;
+    web)    echo "env -C server node $NODE_FLAGS web.js" ;;
     tunnel) echo "cloudflared tunnel --no-autoupdate run ${CLOUDFLARE_TUNNEL}" ;;
   esac
 }
@@ -75,7 +98,12 @@ start_one() {
   # setsid: its own process group, detached from this terminal, so it survives
   # closing it; stop() signals the whole group (run.sh → uvicorn, node → ffmpeg, …).
   echo "=== $(date '+%F %T') start ===" >> "$LOGS/$s.log"
-  setsid bash -c "exec $cmd" >> "$LOGS/$s.log" 2>&1 < /dev/null &
+  rm -rf "${TMP:?}/$s"; mkdir -p "$TMP/$s"
+  if have_scopes; then
+    systemctl --user stop "$(scope "$s")" 2>/dev/null || true # leftovers of a previous run
+    cmd="systemd-run --user --scope --quiet --collect --unit=$(scope "$s") -- $cmd"
+  fi
+  TMPDIR="$TMP/$s" setsid bash -c "exec $cmd" >> "$LOGS/$s.log" 2>&1 < /dev/null &
   echo $! > "$(pidfile "$s")"
   sleep 1
   if ! running "$s"; then echo "$s: exited right away; last lines of $LOGS/$s.log:"; tail -n 15 "$LOGS/$s.log"; rm -f "$(pidfile "$s")"; return 1; fi
@@ -102,6 +130,7 @@ stop_one() {
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
   if kill -0 "$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; echo "$s: killed (didn't stop within 15 s)"; else echo "$s: stopped"; fi
+  systemctl --user stop "$(scope "$s")" 2>/dev/null || true # children that left the process group (Chromium, …)
   rm -f "$(pidfile "$s")"
 }
 
@@ -120,14 +149,17 @@ services() {  # expand "all"/empty, validate names
 in_order() { local s; for s in "${ALL[@]}"; do printf '%s\n' "$@" | grep -qx "$s" && echo "$s"; done; }
 
 status() {
-  local s pid
+  local s pid m
   for s in "${ALL[@]}"; do
     pid="$(pid_of "$s")" || true
-    if [ -n "$pid" ]; then printf "%-12s running (pid %s)\n" "$s" "$pid"
+    if [ -n "$pid" ]; then
+      m="$(mem_of "$pid" "$s")" && m="  $(fmt_mb "$m")" || m=""
+      printf "%-12s running (pid %s)%s\n" "$s" "$pid" "$m"
     elif [ "$s" = transcriber ] && transcriber_up; then printf "%-12s running (not started by this script)\n" "$s"
     else printf "%-12s stopped\n" "$s"
     fi
   done
+  awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} /^SwapTotal/{st=$2} /^SwapFree/{sf=$2} END{printf "\nWSL:         %.1f of %.1f GB in use, swap %.1f of %.1f GB\n", (t-a)/1048576, t/1048576, (st-sf)/1048576, st/1048576}' /proc/meminfo
   local base="http://localhost:${PORT:-3100}/d/<ACCESS_TOKEN>"
   echo; echo "dashboard: ${PUBLIC_URL:-http://localhost:${PORT:-3100}}/d/<ACCESS_TOKEN>   (local: $base)"
   echo "MCP:       ${PUBLIC_URL:-http://localhost:${PORT:-3100}}/d/<ACCESS_TOKEN>/mcp"
@@ -144,6 +176,8 @@ case "$cmd" in
     if running web; then stop_one web; fi
     check web
     echo "web in the foreground, restarting whenever a file it loads changes (Ctrl-C to stop; 'scripts/fetcher start web' to go back)"
-    cd server && exec node --watch web.js ;;
-  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    rm -rf "${TMP:?}/web"; mkdir -p "$TMP/web"; export TMPDIR="$TMP/web"
+    cd server && exec node $NODE_FLAGS --watch web.js ;;
+  mem)     exec "$ROOT/scripts/memwatch" "$@" ;;
+  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

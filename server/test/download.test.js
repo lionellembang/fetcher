@@ -7,6 +7,7 @@ const http = require('http');
 const crypto = require('crypto');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dl-test-'));
+test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 process.env.DOWNLOAD_DIR = dir;
 process.env.DATA_DIR = path.join(dir, 'data');
 const { httpDownload, NotServedError } = require('../src/recordings');
