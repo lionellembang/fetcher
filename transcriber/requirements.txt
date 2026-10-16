@@ -14,3 +14,10 @@ imageio-ffmpeg==0.6.0
 # /embed (search). Do not install torchaudio: transformers imports it if present,
 # and the PyPI build doesn't match the CUDA 13 torch.
 sentence-transformers==6.1.0
+# Whisper itself runs on faster-whisper (CTranslate2); openai-whisper above is kept
+# for audio loading and the SRT/VTT writers.
+faster-whisper==1.2.1
+# CTranslate2 needs CUDA 12 cuBLAS (+ cuDNN 9 as a fallback). Install them OUTSIDE the
+# venv, or cuDNN overwrites PyTorch's CUDA 13 libcudnn.so.9 (run.sh puts ./.cuda12 on
+# the library path):
+#   uv pip install --target .cuda12 --no-deps nvidia-cublas-cu12==12.9.2.10 nvidia-cudnn-cu12==9.27.0.42

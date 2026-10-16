@@ -1,4 +1,5 @@
-"""Minimal HTTP server around OpenAI Whisper, plus text embeddings for search.
+"""Minimal HTTP server around Whisper (faster-whisper / CTranslate2), plus text
+embeddings for search.
 
 POST /jobs         multipart: file=<audio/video>, key, optional language, task, model,
                    vad, gate_db -> {id, status}. Queues a transcription and returns at
@@ -22,7 +23,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import whisper
+import whisper  # openai-whisper: audio loading and the SRT/VTT writers only
+from faster_whisper import WhisperModel, available_models
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
@@ -31,11 +33,14 @@ from whisper.utils import get_writer
 
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "turbo")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# Embeddings run on the CPU: large-v3 already fills ~11.6 of the GPU's 12 GB.
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
+# Greedy decoding with temperature fallback, as openai-whisper did by default.
+TEMPERATURES = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+# Embeddings run on the CPU, so they never compete with Whisper for the GPU.
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-base")
 EMBED_MAX_TEXTS = 256
 
-_models: dict[str, whisper.Whisper] = {}
+_models: dict[str, WhisperModel] = {}
 _lock = threading.Lock()  # one GPU job at a time
 _vad = load_silero_vad()
 _embedder = None
@@ -80,45 +85,47 @@ def speech_clips(audio, gate_db: float) -> list[float]:
             merged.append([sp["start"], sp["end"]])
     # Keep every clip inside the last 10 ms mel frame. If speech runs to the very
     # end and the file isn't a whole number of frames, the last clip ends past it
-    # (e.g. 6036.096 s → frame 603610 of 603609), and whisper.transcribe can then
-    # loop forever on an empty window at the end of the audio (seek += 0).
+    # (e.g. 6036.096 s → frame 603610 of 603609); openai-whisper then looped forever
+    # on an empty window at the end of the audio. faster-whisper clamps this itself;
+    # the clamp stays as a belt-and-braces.
     last = (len(audio) // whisper.audio.HOP_LENGTH) / whisper.audio.FRAMES_PER_SECOND
     merged = [[a, min(b, last)] for a, b in merged]
     return [t for a, b in merged if b - a >= MIN_CLIP_S for t in (a, b)]
 
 
-MAX_SAME_WINDOW = 12  # whisper retries a window at most 6 times (temperature fallback)
+MAX_SAME_WINDOW = 12  # a window is encoded once per step, so this is already generous
 
 
-def _guard_against_loops(model: whisper.Whisper) -> None:
-    """Fail a transcription that keeps decoding the identical window instead of moving on.
+def _guard_against_loops(model: WhisperModel) -> None:
+    """Fail a transcription that keeps encoding the identical window instead of moving on.
 
-    whisper.transcribe has edge cases where `seek` stops advancing and it decodes the
-    same 30 s window forever (one held the GPU for 4+ hours). A thread can't be killed,
-    so raise from inside decode once the same input repeats more than MAX_SAME_WINDOW
-    times in a row; the job then fails with a clear error instead of hanging.
-    (With vad=False, 6+ minutes of exact digital silence would also trip it; with
-    VAD, as the pipeline uses it, silence is never sent to Whisper.)
+    openai-whisper once decoded the same empty window at the end of a lecture for 4+
+    hours, holding the GPU. A thread can't be killed, so raise from inside encode
+    once the same input repeats more than MAX_SAME_WINDOW times in a row; the job
+    then fails with a clear error instead of hanging. (With vad=False, 6+ minutes
+    of exact digital silence would also trip it; with VAD, as the pipeline uses it,
+    silence is never sent to Whisper.)
     """
-    decode = model.decode
+    encode = model.encode
     state = {"prev": None, "repeats": 0}
 
-    def guarded(mel, options=None, **kw):
-        if state["prev"] is not None and state["prev"].shape == mel.shape and torch.equal(state["prev"], mel):
+    def guarded(features):
+        prev = state["prev"]
+        if prev is not None and prev.shape == features.shape and np.array_equal(prev, features):
             state["repeats"] += 1
             if state["repeats"] > MAX_SAME_WINDOW:
                 state["prev"], state["repeats"] = None, 0
-                raise RuntimeError(f"Whisper stopped advancing (decoded the same window {MAX_SAME_WINDOW}+ times)")
+                raise RuntimeError(f"Whisper stopped advancing (the same window {MAX_SAME_WINDOW}+ times in a row)")
         else:
-            state["prev"], state["repeats"] = mel.detach().clone(), 0
-        return decode(mel, options, **kw) if options is not None else decode(mel, **kw)
+            state["prev"], state["repeats"] = np.array(features, copy=True), 0
+        return encode(features)
 
-    model.decode = guarded
+    model.encode = guarded
 
 
-def get_model(name: str) -> whisper.Whisper:
+def get_model(name: str) -> WhisperModel:
     if name not in _models:
-        model = whisper.load_model(name, device=DEVICE)
+        model = WhisperModel(name, device=DEVICE, compute_type=COMPUTE_TYPE)
         _guard_against_loops(model)
         _models[name] = model
     return _models[name]
@@ -135,21 +142,26 @@ def get_embedder():
 
 
 def run_transcription(src: Path, language, task, model, vad, gate_db) -> dict:
-    """Whisper result for an audio/video file. Raises RuntimeError if it can't be decoded."""
+    """Whisper result ({text, language, segments[]}, openai-whisper's shape) for an
+    audio/video file. Raises RuntimeError if it can't be decoded."""
     with _lock:
         audio = whisper.load_audio(str(src))
         opts = dict(
-            language=language, task=task, fp16=(DEVICE == "cuda"),
+            language=language, task=task, beam_size=1, temperature=TEMPERATURES,
             condition_on_previous_text=False,  # stops one bad segment poisoning the rest
+            vad_filter=False,  # we choose the speech ourselves (speech_clips)
         )
-        if vad:
-            clips = speech_clips(audio, gate_db)
-            if not clips:
-                result = {"text": "", "segments": [], "language": language}
-            else:
-                result = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
+        clips = speech_clips(audio, gate_db) if vad else "0"
+        if not clips:
+            result = {"text": "", "segments": [], "language": language}
         else:
-            result = get_model(model).transcribe(audio, **opts)
+            segments, info = get_model(model).transcribe(audio, clip_timestamps=clips, **opts)
+            segs = [
+                {"id": s.id, "start": s.start, "end": s.end, "text": s.text, "avg_logprob": s.avg_logprob,
+                 "no_speech_prob": s.no_speech_prob, "compression_ratio": s.compression_ratio, "temperature": s.temperature}
+                for s in segments  # a generator: the work happens here
+            ]
+            result = {"text": "".join(s["text"] for s in segs), "segments": segs, "language": info.language}
 
     # drop blank segments and likely no-speech hallucinations
     result["segments"] = [
@@ -225,7 +237,7 @@ def embed(req: EmbedRequest):
 def _check(task: str, model: str) -> None:
     if task not in {"transcribe", "translate"}:
         raise HTTPException(400, "task must be transcribe or translate")
-    if model not in whisper.available_models():
+    if model not in available_models():
         raise HTTPException(400, f"unknown model {model}")
 
 

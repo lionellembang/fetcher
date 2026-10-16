@@ -3,7 +3,7 @@
 > Part of **fetcher**: `scripts/start.sh` starts this server for the pipeline,
 > which sends 16 kHz FLAC of each recording and also uses `/embed` for search.
 
-A local HTTP server that turns lecture recordings into subtitles with OpenAI Whisper `large-v3` on an NVIDIA GPU. It skips silence and quiet background chatter before transcribing, which stops Whisper from inventing text on non-speech.
+A local HTTP server that turns lecture recordings into subtitles with Whisper `large-v3` on an NVIDIA GPU, run with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). It skips silence and quiet background chatter before transcribing, which stops Whisper from inventing text on non-speech.
 
 Built for Indonesian university lectures (with English technical terms) on WSL2, but it accepts any audio or video file that ffmpeg can decode.
 
@@ -121,7 +121,15 @@ Checked over four full lectures, the 12 dB gate removed 2–10% of detected spee
 
 ## Performance
 
-On an RTX 5070, `large-v3` with VAD runs at about 5× real time, so one hour of lecture takes roughly 12 minutes.
+On an RTX 5070, `large-v3` with VAD now runs at about 15× real time on faster-whisper (float16, greedy), so one hour of lecture takes roughly 4–5 minutes and uses ~6.4 GB of VRAM. Measured on the same 20-minute excerpt (14.5 min of speech):
+
+| Engine | Time | Speed | Peak VRAM | Words differing from openai-whisper |
+| --- | --- | --- | --- | --- |
+| openai-whisper | 215 s | 5.6× | 11.4 GB | — |
+| faster-whisper, sequential (used) | 82 s | 14.7× | 6.4 GB | 1.4% |
+| faster-whisper, batched ×16 | 17 s | 70× | 9.1 GB | 13% (drops real phrases; not used) |
+
+openai-whisper was slow because its decoding loop is single-threaded Python: one CPU core sat at 100% while the GPU idled at 20–30%. The older numbers below are openai-whisper's.
 
 | Lecture | Length | No VAD | VAD + gate |
 | --- | --- | --- | --- |
