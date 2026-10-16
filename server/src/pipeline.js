@@ -161,7 +161,6 @@ async function runStage(itemId, stage) {
       finished_at: new Date().toISOString(),
     });
     console.log(`✓ ${stage}: ${label(item)} ${r.status || 'done'} in ${Math.round((Date.now() - t0) / 1000)}s`);
-    if (stage === 'index') events.emit('indexed', itemId);
   } catch (err) {
     if (err instanceof UnavailableError) {
       store.setStage(itemId, stage, { status: 'pending', error: err.message, attempts: attempts - 1 });

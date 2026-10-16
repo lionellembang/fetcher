@@ -15,7 +15,6 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const store = require('./store');
-const events = require('./events');
 const whisper = require('./whisper');
 const { loadTimeline, origToCut, mapSegments } = require('./timeline');
 
@@ -95,17 +94,18 @@ function links(item, origSec, spans) {
 
 // ---- search ----
 
-let vectorCache = null; // { rows, mat, dim }
-events.on('indexed', () => (vectorCache = null));
+let vectorCache = null; // { rows, mat, dim, version }
 
 function vectors() {
-  if (vectorCache) return vectorCache;
+  // The worker indexes; this may be the web process. A changed version = new chunks.
+  const version = store.getMeta('chunks_version');
+  if (vectorCache && vectorCache.version === version) return vectorCache;
   const rows = store.allChunks().filter((r) => r.embed_model === config.embedModel);
   const dim = rows.length ? rows[0].embedding.length : 0;
   const mat = new Float32Array(rows.length * dim);
   rows.forEach((r, i) => mat.set(r.embedding, i * dim));
   for (const r of rows) delete r.embedding;
-  vectorCache = { rows, mat, dim };
+  vectorCache = { rows, mat, dim, version };
   return vectorCache;
 }
 

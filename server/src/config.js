@@ -56,6 +56,9 @@ const config = {
   accessToken: process.env.ACCESS_TOKEN || '',
   host: process.env.HOST || '127.0.0.1',
   port: int(process.env.PORT, 3100),
+  // The worker (scan + pipeline) takes commands from the web process on this
+  // local-only port.
+  workerPort: int(process.env.WORKER_PORT, 3101),
   // Base URL for links handed out by MCP (e.g. https://lectures.example.com).
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${int(process.env.PORT, 3100)}`).replace(/\/+$/, ''),
 

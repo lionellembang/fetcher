@@ -19,6 +19,7 @@ function getDb() {
   config.ensureDirs();
   db = new DatabaseSync(config.dbFile);
   db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA busy_timeout = 10000'); // the worker and web processes share the file
   db.exec(`
     CREATE TABLE IF NOT EXISTS items (
       id             TEXT PRIMARY KEY,
@@ -251,6 +252,7 @@ function saveTranscript(itemId, info, segments) {
   transaction((d) => {
     d.prepare('DELETE FROM segments WHERE item_id = ?').run(itemId);
     d.prepare('DELETE FROM chunks WHERE item_id = ?').run(itemId);
+    bumpChunksVersion(d);
     d.prepare(
       `INSERT INTO transcripts (item_id, model, language, params_key, duration, created_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(item_id) DO UPDATE SET model = excluded.model, language = excluded.language,
@@ -298,8 +300,17 @@ function searchSegments(match, { course, period, limit = 200 } = {}) {
 
 // ---- chunks (embeddings) ----
 
+/** Mark the chunks as changed, so every process (web, worker) drops its cached vectors. */
+function bumpChunksVersion(d) {
+  d.prepare(`INSERT INTO meta (key, value) VALUES ('chunks_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(
+    `${Date.now()}-${Math.random()}`
+  );
+}
+
+/** Replace an item's chunks. */
 function saveChunks(itemId, model, chunks) {
   transaction((d) => {
+    bumpChunksVersion(d);
     d.prepare('DELETE FROM chunks WHERE item_id = ?').run(itemId);
     const ins = d.prepare(
       'INSERT INTO chunks (item_id, idx, start, end, seg_from, seg_to, text, embedding, embed_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'

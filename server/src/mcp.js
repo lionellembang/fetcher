@@ -10,11 +10,10 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const z = require('zod');
 const store = require('./store');
-const pipeline = require('./pipeline');
+const control = require('./control');
 const whisper = require('./whisper');
 const transcripts = require('./transcripts');
 const { cutToOrig } = require('./timeline');
-const { runScan, isScanning } = require('./scan');
 
 const MAX_TEXT = 60000; // characters per get_transcript reply
 
@@ -233,11 +232,13 @@ function buildServer() {
           if (s.status === 'failed') failures.push({ session_id: it.session_id, course: it.course_code, session: it.session_number, stage: name, error: (s.error || '').split('\n')[0] });
         }
       }
+      const [w, transcriber] = await Promise.all([control.status(), whisper.health()]);
       return text({
         last_scan: store.getMeta('last_scan'),
-        scanning: isScanning(),
-        transcriber: await whisper.health(),
-        pipeline: pipeline.status(),
+        worker: w ? 'up' : 'down (nothing is being scanned, downloaded or processed)',
+        scanning: w ? w.scanning : null,
+        transcriber,
+        pipeline: w ? w.pipeline : null,
         coverage: transcripts.coverage(),
         failures: failures.slice(0, 30),
       });
@@ -253,9 +254,11 @@ function buildServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async () => {
-      const already = isScanning();
-      runScan().catch((err) => console.error('✗ scan failed:', err.message));
-      return text({ started: !already, scanning: true });
+      try {
+        return text(await control.scan());
+      } catch (err) {
+        return fail(err.message);
+      }
     }
   );
 
@@ -269,7 +272,7 @@ function buildServer() {
     },
     async ({ session_id, stage }) => {
       try {
-        return text({ result: pipeline.retry(`recording:${session_id}`, stage) });
+        return text(await control.retry(`recording:${session_id}`, stage));
       } catch (err) {
         return fail(err.message);
       }

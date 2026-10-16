@@ -1,6 +1,12 @@
 /**
- * Express app. Everything except /healthz lives under the secret ACCESS_TOKEN
- * path segment; any other token 404s.
+ * Express app of the web process (web.js). Everything except /healthz lives
+ * under the secret ACCESS_TOKEN path segment; any other token 404s. Scans,
+ * retries and SharePoint links are forwarded to the worker (control.js).
+ *
+ * Every response is Cache-Control: private, so Cloudflare never caches it. On
+ * a cache miss Cloudflare fetched a whole recording (100-700 MB) through the
+ * tunnel before answering even a small range request, so playback waited
+ * minutes for the 23 KB at the end of the file that Chrome reads first.
  *
  *   GET  /healthz                                → { ok, lastScan, scanning, counts }
  *   GET  /d/<token>                              → HTML dashboard
@@ -17,17 +23,17 @@
 const express = require('express');
 const config = require('./config');
 const store = require('./store');
-const lms = require('./lms');
-const pipeline = require('./pipeline');
+const control = require('./control');
 const whisper = require('./whisper');
 const transcripts = require('./transcripts');
-const { runScan, isScanning } = require('./scan');
 const { renderDashboard, renderSession, renderSearch } = require('./page');
 const { handleMcp } = require('./mcp');
 
 const itemId = (sessionId) => `recording:${sessionId}`;
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const wantsHtml = (req) => (req.get('accept') || '').includes('text/html');
+// Browsers may keep a copy but must revalidate (ETag); shared caches (Cloudflare) must not store it.
+const PRIVATE = 'private, no-cache';
 
 function createApp() {
   const app = express();
@@ -49,12 +55,23 @@ function createApp() {
     next();
   });
 
-  app.get('/healthz', (req, res) => {
-    res.json({ ok: true, lastScan: store.getMeta('last_scan'), scanning: isScanning(), counts: store.counts() });
-  });
+  app.get(
+    '/healthz',
+    wrap(async (req, res) => {
+      const w = await control.status();
+      res.set('cache-control', 'no-store').json({
+        ok: true,
+        worker: w ? 'up' : 'down',
+        lastScan: store.getMeta('last_scan'),
+        scanning: w ? w.scanning : null,
+        counts: store.counts(),
+      });
+    })
+  );
 
   const d = express.Router({ mergeParams: true });
   d.use((req, res, next) => {
+    res.set('cache-control', PRIVATE);
     if (!config.accessToken || req.params.token !== config.accessToken) return res.status(404).send('Not found');
     next();
   });
@@ -62,15 +79,16 @@ function createApp() {
   d.get(
     '/',
     wrap(async (req, res) => {
+      const [w, whisperUp] = await Promise.all([control.status(), whisper.health().then(Boolean)]);
       res.type('html').send(
         renderDashboard({
           base: req.baseUrl,
           items: store.listItems({ kind: 'recording' }),
           stages: store.stagesByItem(),
           lastScan: store.getMeta('last_scan'),
-          scanning: isScanning(),
-          pipe: pipeline.status(),
-          whisperUp: !!(await whisper.health()),
+          scanning: w ? w.scanning : false,
+          pipe: w ? w.pipeline : null,
+          whisperUp,
         })
       );
     })
@@ -118,35 +136,48 @@ function createApp() {
     res.type(type).send(transcripts.render(segs, fmt));
   });
 
-  d.post('/scan', (req, res) => {
-    const already = isScanning();
-    runScan().catch((err) => console.error('✗ scan failed:', err.message));
+  const workerError = (res, err) => res.status(err instanceof control.WorkerDownError ? 503 : err.status || 502).send(err.message);
+
+  d.post('/scan', async (req, res) => {
+    let r;
+    try {
+      r = await control.scan();
+    } catch (err) {
+      return workerError(res, err);
+    }
     if (wantsHtml(req)) return res.redirect(303, req.baseUrl);
-    res.status(202).json({ started: !already, scanning: true });
+    res.status(202).json(r);
   });
 
-  d.post('/retry/:sessionId/:stage', (req, res) => {
-    let result;
+  d.post('/retry/:sessionId/:stage', async (req, res) => {
+    let r;
     try {
-      result = pipeline.retry(itemId(req.params.sessionId), req.params.stage);
+      r = await control.retry(itemId(req.params.sessionId), req.params.stage);
     } catch (err) {
-      return res.status(400).send(err.message);
+      return workerError(res, err);
     }
     if (wantsHtml(req)) return res.redirect(303, `${req.baseUrl}/s/${encodeURIComponent(req.params.sessionId)}`);
-    res.status(202).json({ result });
+    res.status(202).json(r);
   });
 
   d.get('/recording/:sessionId', async (req, res) => {
     try {
-      const rec = await lms.zoomRecording(req.params.sessionId);
-      if (!rec || !rec.recordingUrl) return res.status(404).send('No recording for this session (yet).');
-      res.redirect(302, rec.recordingUrl);
+      res.redirect(302, (await control.recordingLink(req.params.sessionId)).url);
     } catch (err) {
-      res.status(502).send(`Could not get the recording link: ${err.message}`);
+      workerError(res, err);
     }
   });
 
-  d.use('/files', express.static(config.downloadDir, { dotfiles: 'deny', index: false }));
+  // Range requests (seeking) are handled by express.static; caching headers are ours.
+  d.use(
+    '/files',
+    express.static(config.downloadDir, {
+      dotfiles: 'deny',
+      index: false,
+      cacheControl: false,
+      setHeaders: (res) => res.set('cache-control', PRIVATE),
+    })
+  );
 
   // ---- JSON API ----
 
@@ -168,12 +199,14 @@ function createApp() {
   d.get(
     '/api/status',
     wrap(async (req, res) => {
+      const [w, transcriber] = await Promise.all([control.status(), whisper.health()]);
       res.json({
         lastScan: store.getMeta('last_scan'),
-        scanning: isScanning(),
+        worker: w ? 'up' : 'down',
+        scanning: w ? w.scanning : null,
         counts: store.counts(),
-        pipeline: pipeline.status(),
-        transcriber: await whisper.health(),
+        pipeline: w ? w.pipeline : null,
+        transcriber,
         coverage: transcripts.coverage(),
       });
     })

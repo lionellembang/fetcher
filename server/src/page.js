@@ -103,10 +103,12 @@ function recCell(base, it, probe) {
 }
 
 function pipelineLine(pipe, whisperUp) {
+  const tr = `Transcriber: ${whisperUp ? '<span class="ok">up</span>' : '<span class="err">down</span>'}`;
+  if (!pipe) return `Pipeline: <span class="err">worker not running</span> (no scans or processing) · ${tr}`;
   const parts = Object.entries(pipe.lanes)
     .filter(([, l]) => l.running || l.queued)
     .map(([stage, l]) => `${stage}: ${l.running ? esc(l.running.label) : 'idle'}${l.queued ? ` (+${l.queued} queued)` : ''}${l.paused ? ' (paused)' : ''}`);
-  return `Pipeline: ${parts.length ? parts.join(' · ') : 'idle'} · Transcriber: ${whisperUp ? '<span class="ok">up</span>' : '<span class="err">down</span>'}`;
+  return `Pipeline: ${parts.length ? parts.join(' · ') : 'idle'} · ${tr}`;
 }
 
 // ---- dashboard ----

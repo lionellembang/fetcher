@@ -6,15 +6,22 @@ and from Claude over MCP. Ask "where did the lecturer explain X?" and get the
 lecture, the timestamp and a link that opens the video at that moment.
 
 ```
-scripts/start.sh
- ├─ transcriber/   Python: Whisper large-v3 on the GPU + text embeddings on the CPU   :8000
- ├─ server/        Node: LMS scan → download → pipeline → dashboard + MCP            :3100
+scripts/fetcher start            (each service can be started/stopped/restarted on its own)
+ ├─ transcriber  transcriber/        Whisper large-v3 (GPU) + text embeddings (CPU)        :8000
+ ├─ worker       server/worker.js    the backend: LMS scan → download → pipeline           :3101 (local)
  │    scan (every 6 h) ─▶ download (Playwright, SharePoint)
  │                          └─▶ probe (loudness, duration)
  │                                ├─▶ cut (auto-editor)          → video for watching
  │                                └─▶ transcribe (original audio) ─▶ index (embeddings)
- └─ cloudflared    https://lectures.<your-domain> → 127.0.0.1:3100
+ ├─ web          server/web.js       the frontend: dashboard, player, search, files, MCP   :3100
+ └─ tunnel       cloudflared         https://lectures.<your-domain> → 127.0.0.1:3100
 ```
+
+The worker is the only part that writes pipeline state or talks to the LMS. The
+web part reads the shared SQLite database directly and sends the few actions
+(scan now, redo a step, fetch a SharePoint link) to the worker, so it can be
+restarted at any moment without interrupting work. With the worker stopped, the
+dashboard, search and MCP keep working; actions just say the worker isn't running.
 
 The three original repos live here as git subtrees with their history:
 `server/` (downloadrecord), `transcriber/` (transcription), `cutting/` (the
@@ -76,15 +83,23 @@ Set `PUBLIC_URL=https://lectures.<your-domain>` and `CLOUDFLARE_TUNNEL=fetcher` 
 ## Run
 
 ```bash
-scripts/start.sh
+scripts/fetcher start              # everything: transcriber, worker, web, tunnel
+scripts/fetcher status             # what's running
+scripts/fetcher restart web        # after changing the dashboard/MCP code (pipeline keeps going)
+scripts/fetcher restart worker     # after changing scan/pipeline code
+scripts/fetcher stop [SERVICE]     # one service, or everything
+scripts/fetcher logs [SERVICE]     # follow logs (default: worker + web)
+scripts/fetcher dev                # web in the foreground, reloading on every code change
 ```
 
-It starts the transcriber (or uses one that's already running), then the
-server, then the tunnel, and follows the server log. Ctrl-C stops everything.
-On start the server scans the LMS, then again every `SCAN_INTERVAL_MINUTES`.
-Work interrupted by a stop picks up where it left off on the next start.
+Services run detached, so they keep running after you close the terminal
+(`scripts/start.sh` is `fetcher start` + `fetcher logs`; Ctrl-C there only stops
+following the logs). The worker scans the LMS when it starts, then every
+`SCAN_INTERVAL_MINUTES`. Stopping the worker or transcriber redoes only the step
+that was running; stopping web or tunnel interrupts nothing.
 
-Logs are in `logs/` (`server.log`, `transcriber.log`, `cloudflared.log`).
+Logs are in `logs/` (`worker.log`, `web.log`, `transcriber.log`, `tunnel.log`),
+pid files in `run/`.
 
 ## Use it
 
@@ -172,10 +187,21 @@ npm run pipeline [-- <sessionId>]     # process downloaded recordings (all, or s
 npm run login                     # force a fresh login (HEADFUL=true to watch)
 ```
 
+`scan`, `recordings` and `pipeline` do the worker's job in a one-off process:
+stop the worker first (`scripts/fetcher stop worker`), or both will work on the
+same recordings.
+
 ## Troubleshooting
 
 - **Transcriber "down" on the dashboard.** Check `logs/transcriber.log`. A WSL
-  restart stops everything: run `scripts/start.sh` again.
+  restart stops everything: run `scripts/fetcher start` again.
+- **"worker not running" on the dashboard.** `scripts/fetcher start worker`;
+  `logs/worker.log` says why it stopped.
+- **Videos take a minute to start.** Every response is sent `Cache-Control:
+  private` so Cloudflare doesn't cache it: on a cache miss Cloudflare pulled the
+  whole file (100-700 MB) through the tunnel before answering the small range
+  request Chrome makes for the end of the file. Don't add a Cloudflare cache rule
+  for this hostname.
 - **WSL runs out of memory.** Chromium, an auto-editor encode, Whisper and the
   embedding model together can be a lot for 7 GB. Set `HEAVY_CONCURRENCY=1`, or raise
   `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`.

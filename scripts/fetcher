@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Start, stop and restart fetcher's services one at a time, so each part can be
+# changed without taking the rest down.
+#
+#   transcriber  Whisper + search embeddings (Python)       logs/transcriber.log
+#   worker       LMS scan, downloads, cut/transcribe/index    logs/worker.log
+#   web          dashboard, player, search, MCP               logs/web.log
+#   tunnel       Cloudflare tunnel (if CLOUDFLARE_TUNNEL set) logs/tunnel.log
+#
+# usage: scripts/fetcher start|stop|restart [all|SERVICE...]   (default: all)
+#        scripts/fetcher status
+#        scripts/fetcher logs [SERVICE]       follow a log (default: worker + web)
+#        scripts/fetcher dev                  web in the foreground, reloading on code changes
+#
+# Services run detached (they keep running after you close the terminal) with
+# pid files in run/. Stopping the worker or transcriber only redoes the work
+# that was running; stopping web or tunnel interrupts nothing.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+ENV_FILE="${ENV_FILE:-.env}"
+[ -f "$ENV_FILE" ] || { echo "No $ENV_FILE: cp .env.example .env and fill it in."; exit 1; }
+set -a; . "$ENV_FILE"; set +a
+export PATH="$HOME/.local/bin:$PATH"
+WHISPER_URL="${WHISPER_URL:-http://127.0.0.1:8000}"
+LOGS="${LOG_DIR:-logs}"; RUN="${RUN_DIR:-run}"
+mkdir -p "$LOGS" "$RUN"
+
+ALL=(transcriber worker web tunnel)   # start order; stop goes in reverse
+
+pidfile() { echo "$RUN/$1.pid"; }
+pid_of() { local f; f="$(pidfile "$1")"; [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && cat "$f"; }
+running() { [ -n "$(pid_of "$1")" ]; }
+transcriber_up() { curl -sf -m 2 "$WHISPER_URL/health" >/dev/null; }
+
+# The command line for each service (run from $ROOT).
+cmd_for() {
+  case "$1" in
+    transcriber)
+      local venv port
+      venv="$(realpath -m "${TRANSCRIBER_VENV:-./transcriber/.venv}")"
+      [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (set TRANSCRIBER_VENV)." >&2; return 1; }
+      port="${WHISPER_URL##*:}"; port="${port%%/*}"
+      echo "env VENV=$venv HOST=127.0.0.1 PORT=$port transcriber/run.sh" ;;
+    worker) echo "env -C server node worker.js" ;;
+    web)    echo "env -C server node web.js" ;;
+    tunnel) echo "cloudflared tunnel --no-autoupdate run ${CLOUDFLARE_TUNNEL}" ;;
+  esac
+}
+
+check() {
+  case "$1" in
+    web)
+      if [ "${#ACCESS_TOKEN}" -lt 32 ]; then
+        echo "ACCESS_TOKEN is too short to put on the internet. Generate one with:"
+        echo "  node -e \"console.log(require('crypto').randomBytes(24).toString('hex'))\""
+        return 1
+      fi ;;
+    worker) for t in node ffmpeg ffprobe auto-editor; do command -v "$t" >/dev/null || { echo "Missing $t on PATH (see README → Setup)."; return 1; }; done ;;
+    tunnel)
+      [ -n "${CLOUDFLARE_TUNNEL:-}" ] || { echo "tunnel: CLOUDFLARE_TUNNEL is empty in .env; skipping."; return 2; }
+      command -v cloudflared >/dev/null || { echo "Missing cloudflared on PATH."; return 1; } ;;
+  esac
+}
+
+start_one() {
+  local s="$1" rc=0 cmd
+  if running "$s"; then echo "$s: already running (pid $(pid_of "$s"))"; return 0; fi
+  if [ "$s" = transcriber ] && transcriber_up; then echo "transcriber: already running at $WHISPER_URL (not started by this script)"; return 0; fi
+  check "$s" || rc=$?
+  [ $rc -eq 2 ] && return 0
+  [ $rc -ne 0 ] && return 1
+  cmd="$(cmd_for "$s")" || return 1
+  # setsid: its own process group, detached from this terminal, so it survives
+  # closing it; stop() signals the whole group (run.sh → uvicorn, node → ffmpeg, …).
+  echo "=== $(date '+%F %T') start ===" >> "$LOGS/$s.log"
+  setsid bash -c "exec $cmd" >> "$LOGS/$s.log" 2>&1 < /dev/null &
+  echo $! > "$(pidfile "$s")"
+  sleep 1
+  if ! running "$s"; then echo "$s: exited right away; last lines of $LOGS/$s.log:"; tail -n 15 "$LOGS/$s.log"; rm -f "$(pidfile "$s")"; return 1; fi
+  if [ "$s" = transcriber ]; then
+    printf "transcriber: loading the model "
+    until transcriber_up; do
+      running transcriber || { echo; echo "transcriber: exited; see $LOGS/transcriber.log"; tail -n 15 "$LOGS/transcriber.log"; return 1; }
+      printf "."; sleep 3
+    done
+    echo " up"
+  else
+    echo "$s: started (pid $(pid_of "$s"))"
+  fi
+}
+
+stop_one() {
+  local s="$1" pid
+  pid="$(pid_of "$s")" || true
+  if [ -z "$pid" ]; then
+    rm -f "$(pidfile "$s")"
+    if [ "$s" = transcriber ] && transcriber_up; then echo "transcriber: running but not started by this script; stop it yourself"; else echo "$s: not running"; fi
+    return 0
+  fi
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; echo "$s: killed (didn't stop within 15 s)"; else echo "$s: stopped"; fi
+  rm -f "$(pidfile "$s")"
+}
+
+services() {  # expand "all"/empty, validate names
+  local out=() s
+  [ $# -eq 0 ] && set -- all
+  for s in "$@"; do
+    if [ "$s" = all ]; then out+=("${ALL[@]}")
+    elif [[ " ${ALL[*]} " == *" $s "* ]]; then out+=("$s")
+    else echo "unknown service '$s' (one of: ${ALL[*]}, all)" >&2; exit 1
+    fi
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+in_order() { local s; for s in "${ALL[@]}"; do printf '%s\n' "$@" | grep -qx "$s" && echo "$s"; done; }
+
+status() {
+  local s pid
+  for s in "${ALL[@]}"; do
+    pid="$(pid_of "$s")" || true
+    if [ -n "$pid" ]; then printf "%-12s running (pid %s)\n" "$s" "$pid"
+    elif [ "$s" = transcriber ] && transcriber_up; then printf "%-12s running (not started by this script)\n" "$s"
+    else printf "%-12s stopped\n" "$s"
+    fi
+  done
+  local base="http://localhost:${PORT:-3100}/d/<ACCESS_TOKEN>"
+  echo; echo "dashboard: ${PUBLIC_URL:-http://localhost:${PORT:-3100}}/d/<ACCESS_TOKEN>   (local: $base)"
+  echo "MCP:       ${PUBLIC_URL:-http://localhost:${PORT:-3100}}/d/<ACCESS_TOKEN>/mcp"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  start)   mapfile -t S < <(services "$@"); for s in $(in_order "${S[@]}"); do start_one "$s"; done; echo; status ;;
+  stop)    mapfile -t S < <(services "$@"); for s in $(in_order "${S[@]}" | tac); do stop_one "$s"; done ;;
+  restart) mapfile -t S < <(services "$@"); for s in $(in_order "${S[@]}" | tac); do stop_one "$s"; done; for s in $(in_order "${S[@]}"); do start_one "$s"; done ;;
+  status)  status ;;
+  logs)    if [ $# -eq 0 ]; then exec tail -n 30 -F "$LOGS/worker.log" "$LOGS/web.log"; else exec tail -n 50 -F "$LOGS/$1.log"; fi ;;
+  dev)
+    if running web; then stop_one web; fi
+    check web
+    echo "web in the foreground, restarting whenever a file it loads changes (Ctrl-C to stop; 'scripts/fetcher start web' to go back)"
+    cd server && exec node --watch web.js ;;
+  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

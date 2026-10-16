@@ -6,3 +6,6 @@ logs/
 # runtime data (relative DATA_DIR / DOWNLOAD_DIR)
 /data/
 /downloads/
+
+# service pid files (scripts/fetcher)
+/run/
