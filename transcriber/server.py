@@ -78,12 +78,49 @@ def speech_clips(audio, gate_db: float) -> list[float]:
             merged[-1][1] = sp["end"]
         else:
             merged.append([sp["start"], sp["end"]])
+    # Keep every clip inside the last 10 ms mel frame. If speech runs to the very
+    # end and the file isn't a whole number of frames, the last clip ends past it
+    # (e.g. 6036.096 s → frame 603610 of 603609), and whisper.transcribe can then
+    # loop forever on an empty window at the end of the audio (seek += 0).
+    last = (len(audio) // whisper.audio.HOP_LENGTH) / whisper.audio.FRAMES_PER_SECOND
+    merged = [[a, min(b, last)] for a, b in merged]
     return [t for a, b in merged if b - a >= MIN_CLIP_S for t in (a, b)]
+
+
+MAX_SAME_WINDOW = 12  # whisper retries a window at most 6 times (temperature fallback)
+
+
+def _guard_against_loops(model: whisper.Whisper) -> None:
+    """Fail a transcription that keeps decoding the identical window instead of moving on.
+
+    whisper.transcribe has edge cases where `seek` stops advancing and it decodes the
+    same 30 s window forever (one held the GPU for 4+ hours). A thread can't be killed,
+    so raise from inside decode once the same input repeats more than MAX_SAME_WINDOW
+    times in a row; the job then fails with a clear error instead of hanging.
+    (With vad=False, 6+ minutes of exact digital silence would also trip it; with
+    VAD, as the pipeline uses it, silence is never sent to Whisper.)
+    """
+    decode = model.decode
+    state = {"prev": None, "repeats": 0}
+
+    def guarded(mel, options=None, **kw):
+        if state["prev"] is not None and state["prev"].shape == mel.shape and torch.equal(state["prev"], mel):
+            state["repeats"] += 1
+            if state["repeats"] > MAX_SAME_WINDOW:
+                state["prev"], state["repeats"] = None, 0
+                raise RuntimeError(f"Whisper stopped advancing (decoded the same window {MAX_SAME_WINDOW}+ times)")
+        else:
+            state["prev"], state["repeats"] = mel.detach().clone(), 0
+        return decode(mel, options, **kw) if options is not None else decode(mel, **kw)
+
+    model.decode = guarded
 
 
 def get_model(name: str) -> whisper.Whisper:
     if name not in _models:
-        _models[name] = whisper.load_model(name, device=DEVICE)
+        model = whisper.load_model(name, device=DEVICE)
+        _guard_against_loops(model)
+        _models[name] = model
     return _models[name]
 
 
