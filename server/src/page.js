@@ -1,7 +1,7 @@
 /**
  * Server-rendered pages:
- *   renderDashboard  one table per class, one row per session, with each
- *                    stage's state (recording · cut · transcript)
+ *   renderDashboard  bento grid: search, progress and system tiles, then one
+ *                    card per course with a tile per session (its state)
  *   renderSession    player (original / cut) with the synced transcript
  *   renderSearch     hybrid search across every lecture
  */
@@ -13,7 +13,6 @@ const esc = (s) =>
 
 const fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 const fmtSize = (n) => (n == null ? '' : n < 1024 ** 2 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`);
-const fmtMin = (sec) => (sec == null ? '' : `${Math.round(sec / 60)} min`);
 const filesHref = (base, rel) => `${base}/files/${String(rel).split(/[\\/]/).map(encodeURIComponent).join('/')}`;
 const sessionHref = (base, sessionId) => `${base}/s/${encodeURIComponent(sessionId)}`;
 /** JSON safe to drop inside <script>. */
@@ -47,116 +46,265 @@ const STYLE = `
   .status { font-size:.85rem; }
 `;
 
-function layout(title, body, { base } = {}) {
+function layout(title, body, { base, search = true } = {}) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title><style>${STYLE}</style></head>
 <body><main>
-${base ? `<form class="row" method="get" action="${base}/search" style="margin-bottom:16px"><a href="${base}">Lectures</a><input type="search" name="q" placeholder="Search all lectures…" aria-label="Search all lectures"><button>Search</button></form>` : ''}
+${base && search ? `<form class="row" method="get" action="${base}/search" style="margin-bottom:16px"><a href="${base}">Lectures</a><input type="search" name="q" placeholder="Search all lectures…" aria-label="Search all lectures"><button>Search</button></form>` : ''}
 ${body}
 </main></body></html>`;
 }
 
-// ---- stage cells ----
+// ---- dashboard (bento) ----
 
-function stageCell(st, kind) {
-  if (!st) return '<span class="muted">—</span>';
-  const title = esc(st.error || '');
-  switch (st.status) {
-    case 'running':
-      return `<span class="warn">${kind === 'cut' ? 'cutting…' : kind === 'transcribe' ? 'transcribing…' : `${kind}…`}</span>`;
-    case 'pending':
-      return `<span class="muted" title="${title}">${st.error ? 'waiting' : 'queued'}</span>`;
-    case 'skipped':
-      return `<span class="muted" title="${esc(st.meta.reason || '')}">skipped (${esc(st.meta.reason === 'no audio' ? 'no audio' : 'silent')})</span>`;
-    case 'failed':
-      return `<span class="err" title="${title}">failed</span>`;
-    default:
-      return null; // done: caller renders it
+const TZ = process.env.TZ || 'Asia/Jakarta';
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "16 Sep" (en-GB's short month is "Sept", too wide for a session tile). */
+function fmtDay(iso) {
+  if (!iso) return '';
+  const [d, m] = new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'numeric', timeZone: TZ }).split('/');
+  return `${Number(d)} ${MONTHS[Number(m) - 1]}`;
+}
+const fmtLongDay = (iso) =>
+  iso ? new Date(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: TZ }) : '';
+const fmtHours = (sec) => {
+  if (sec == null) return '';
+  const m = Math.round(sec / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+};
+function ago(iso) {
+  if (!iso) return 'never';
+  const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.round(min / 60);
+  return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+}
+
+const VERB = { probe: 'checking audio', cut: 'cutting', transcribe: 'transcribing', index: 'indexing' };
+
+/**
+ * What a session tile shows: { kind, label, detail, href }.
+ * kind: ready | busy | queued | silent | soon | failed | fetching
+ */
+function tileState(base, it, st = {}) {
+  const sp = `${base}/recording/${encodeURIComponent(it.session_id)}`;
+  if (it.status === 'not_yet') return { kind: 'soon', label: 'not yet', detail: 'No recording yet (they appear a few days after class).' };
+  if (it.status === 'failed') return { kind: 'failed', label: 'download failed', detail: it.error || '', href: sp };
+  if (it.status !== 'downloaded') return { kind: 'fetching', label: 'downloading', detail: 'Found on SharePoint; downloading on the next scan.', href: sp };
+  const href = sessionHref(base, it.session_id);
+  const probe = st.probe && st.probe.status === 'done' ? st.probe.meta : null;
+  if ((st.transcribe && st.transcribe.status === 'skipped') || (probe && audioClass(probe).silent)) {
+    return { kind: 'silent', label: 'no audio', detail: 'The recording has no usable audio.', href };
   }
-}
-
-function cutCell(base, st) {
-  const c = stageCell(st, 'cut');
-  if (c !== null) return c;
-  return `<a href="${filesHref(base, st.output_path)}">Cut</a> <span class="muted">${st.meta.keptPct != null ? `${st.meta.keptPct}% kept` : ''}</span>`;
-}
-
-function transcriptCell(base, item, st) {
-  const t = st.transcribe;
-  const c = stageCell(t, 'transcribe');
-  if (c !== null) return c;
-  const idx = st.index;
-  const idxNote = !idx ? '' : idx.status === 'failed' ? ` <span class="err" title="${esc(idx.error)}">search index failed</span>` : idx.status !== 'done' ? ' <span class="muted">indexing…</span>' : '';
-  return `<a href="${sessionHref(base, item.session_id)}">Transcript</a> <span class="muted">${t.meta.segments ?? ''} lines</span>${idxNote}`;
-}
-
-function recCell(base, it, probe) {
-  if (it.status === 'not_yet') return '<span class="muted">not yet</span>';
-  const open = `<a href="${base}/recording/${encodeURIComponent(it.session_id)}" target="_blank" rel="noopener">SharePoint</a>`;
-  if (it.status === 'downloaded') {
-    const flag = probe && probe.status === 'done' && audioClass(probe.meta).quiet ? ' <span class="warn" title="very quiet recording">quiet</span>' : '';
-    return `<a href="${filesHref(base, it.file_path)}">Recording</a> <span class="muted">${fmtSize(it.size)}${probe && probe.meta && probe.meta.duration ? ` · ${fmtMin(probe.meta.duration)}` : ''}</span>${flag} · ${open}`;
+  for (const stage of ['probe', 'cut', 'transcribe', 'index']) {
+    const s = st[stage];
+    if (s && s.status === 'failed') return { kind: 'failed', label: `${stage} failed`, detail: (s.error || '').split('\n')[0], href };
   }
-  if (it.status === 'failed') return `${open} · <span class="err" title="${esc(it.error || '')}">download failed</span>`;
-  return `${open} · <span class="muted">download pending</span>`;
+  for (const stage of ['probe', 'cut', 'transcribe', 'index']) {
+    if (st[stage] && st[stage].status === 'running') return { kind: 'busy', label: `${VERB[stage]}…`, detail: '', href };
+  }
+  if (st.transcribe && st.transcribe.status === 'done' && (!st.index || st.index.status === 'done')) {
+    const bits = [`${st.transcribe.meta.segments ?? '?'} transcript lines`];
+    if (st.cut && st.cut.status === 'done' && st.cut.meta.keptPct != null) bits.push(`cut keeps ${st.cut.meta.keptPct}%`);
+    if (probe && audioClass(probe).quiet) bits.push('quiet recording');
+    return { kind: 'ready', label: 'ready', detail: bits.join(' · '), href };
+  }
+  const waiting = ['probe', 'cut', 'transcribe', 'index'].map((k) => st[k]).find((s) => s && s.status === 'pending' && s.error);
+  return { kind: 'queued', label: waiting ? 'waiting' : 'queued', detail: waiting ? waiting.error : 'Queued for processing.', href };
 }
 
-function pipelineLine(pipe, whisperUp) {
-  const tr = `Transcriber: ${whisperUp ? '<span class="ok">up</span>' : '<span class="err">down</span>'}`;
-  if (!pipe) return `Pipeline: <span class="err">worker not running</span> (no scans or processing) · ${tr}`;
-  const parts = Object.entries(pipe.lanes)
-    .filter(([, l]) => l.running || l.queued)
-    .map(([stage, l]) => `${stage}: ${l.running ? esc(l.running.label) : 'idle'}${l.queued ? ` (+${l.queued} queued)` : ''}${l.paused ? ' (paused)' : ''}`);
-  return `Pipeline: ${parts.length ? parts.join(' · ') : 'idle'} · ${tr}`;
+const DASH_STYLE = `
+  main { max-width:76rem; }
+  :root { --card:#f6f6f8; --card-line:#e6e6ea; --ready:#e3f4ea; --ready-fg:#17663f; --busy:#fff1d6; --busy-fg:#8a5300;
+          --failed:#fde7e4; --failed-fg:#a3281b; --silent:#eeeef1; --soon:transparent; --bar:#d9dce6; }
+  @media (prefers-color-scheme: dark) { :root { --card:#1c1c20; --card-line:#2c2c32; --ready:#173226; --ready-fg:#7fdcaa;
+          --busy:#3a2e14; --busy-fg:#f3c26b; --failed:#3d1d1a; --failed-fg:#ff9a8c; --silent:#25252a; --bar:#34343c; } }
+  .bento { display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); gap:14px; }
+  .tile { background:var(--card); border:1px solid var(--card-line); border-radius:16px; padding:18px; min-width:0; }
+  .s2 { grid-column:span 2; } .s3 { grid-column:span 3; } .s4 { grid-column:span 4; } .s6 { grid-column:span 6; }
+  @media (max-width: 960px) { .bento { grid-template-columns:repeat(2, minmax(0, 1fr)); } .s2, .s3 { grid-column:span 1; } .s4, .s6 { grid-column:span 2; } }
+  @media (max-width: 620px) { .bento { grid-template-columns:minmax(0, 1fr); } .s2, .s3, .s4, .s6 { grid-column:span 1; } }
+  .eyebrow { font-size:.75rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 6px; }
+  .big { font-size:2rem; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .bar { height:8px; border-radius:99px; background:var(--bar); overflow:hidden; margin-top:12px; }
+  .bar > span { display:block; height:100%; background:var(--ok); border-radius:99px; }
+  .hero h1 { font-size:1.6rem; margin:0 0 4px; }
+  .hero form { display:flex; gap:8px; margin-top:14px; }
+  .hero input[type=search] { font-size:1.05rem; padding:10px 14px; border-radius:10px; }
+  .hero button { padding:10px 18px; border-radius:10px; background:var(--accent); color:#fff; border-color:transparent; }
+  .sys dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:0 0 12px; font-size:.9rem; }
+  .sys dt { color:var(--muted); } .sys dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .dot.on { background:var(--ok); } .dot.off { background:var(--err); }
+  .latest a { text-decoration:none; color:inherit; } .latest a:hover .title { text-decoration:underline; }
+  .latest .title { font-weight:600; margin:2px 0; }
+  .course header { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:12px; }
+  .course h2 { font-size:1.05rem; margin:2px 0 0; }
+  .code { font:600 .75rem ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); }
+  .count { font-size:.85rem; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .comp { display:flex; align-items:center; gap:6px; margin:10px 0 6px; font-size:.8rem; color:var(--muted); }
+  .sessions { display:grid; grid-template-columns:repeat(auto-fill, minmax(64px, 1fr)); gap:8px; }
+  .s { display:flex; flex-direction:column; gap:1px; padding:8px 7px; border-radius:10px; text-decoration:none; color:inherit;
+       border:1px solid transparent; min-height:64px; font-size:.72rem; line-height:1.3; min-width:0; }
+  .s > * { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .s b { font-size:1rem; } .s .lbl { font-weight:600; margin-top:auto; }
+  a.s:hover, a.s:focus-visible { border-color:var(--accent); outline:none; }
+  .s.ready { background:var(--ready); } .s.ready .lbl { color:var(--ready-fg); }
+  .s.busy, .s.queued, .s.fetching { background:var(--busy); } .s.busy .lbl, .s.queued .lbl, .s.fetching .lbl { color:var(--busy-fg); }
+  .s.failed { background:var(--failed); } .s.failed .lbl { color:var(--failed-fg); }
+  .s.silent { background:repeating-linear-gradient(135deg, var(--silent) 0 6px, transparent 6px 12px); border-color:var(--card-line); }
+  .s.soon { border:1px dashed var(--card-line); color:var(--muted); }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; margin:20px 2px 0; font-size:.8rem; color:var(--muted); }
+  .legend i { display:inline-block; width:12px; height:12px; border-radius:4px; margin-right:6px; vertical-align:-1px; }
+`;
+
+function sessionTile(base, it, st) {
+  const t = tileState(base, it, st);
+  const dur = st && st.probe && st.probe.meta && st.probe.meta.duration;
+  const tip = [`Session ${it.session_number}`, fmtLongDay(it.session_date), dur ? fmtHours(dur) : '', t.detail].filter(Boolean).join(' · ');
+  const body = `<b>S${esc(it.session_number)}</b><span>${esc(fmtDay(it.session_date))}</span>${dur ? `<span class="muted">${fmtHours(dur)}</span>` : ''}<span class="lbl">${esc(t.label)}</span>`;
+  const ext = t.href && t.href.includes('/recording/') ? ' target="_blank" rel="noopener"' : '';
+  return t.href
+    ? `<a class="s ${t.kind}" href="${t.href}"${ext} title="${esc(tip)}" aria-label="${esc(tip)}">${body}</a>`
+    : `<div class="s ${t.kind}" title="${esc(tip)}" aria-label="${esc(tip)}">${body}</div>`;
 }
 
-// ---- dashboard ----
+const isWide = (course) => course.components.size > 1 || [...course.components.values()].flat().length > 6;
+
+/**
+ * Give each course card a column span so rows fill the 6-column grid exactly:
+ * two wide cards (3 + 3), then three narrow ones (2 + 2 + 2), alternating;
+ * leftovers stretch to fill their row. Returns [[course, spanClass], …].
+ */
+function packCourses(courses) {
+  const wide = courses.filter(isWide);
+  const narrow = courses.filter((c) => !isWide(c));
+  const out = [];
+  while (wide.length || narrow.length) {
+    if (wide.length >= 2) out.push([wide.shift(), 's3'], [wide.shift(), 's3']);
+    else if (wide.length === 1) {
+      if (narrow.length) out.push([wide.shift(), 's4'], [narrow.shift(), 's2']);
+      else out.push([wide.shift(), 's6']);
+    }
+    if (narrow.length >= 3) out.push([narrow.shift(), 's2'], [narrow.shift(), 's2'], [narrow.shift(), 's2']);
+    else if (!wide.length && narrow.length === 2) out.push([narrow.shift(), 's3'], [narrow.shift(), 's3']);
+    else if (!wide.length && narrow.length === 1) out.push([narrow.shift(), 's6']);
+  }
+  return out;
+}
+
+function courseCard(base, course, stages, span) {
+  const comps = [...course.components.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const all = comps.flatMap(([, list]) => list);
+  const ready = all.filter((it) => tileState(base, it, stages[it.id]).kind === 'ready').length;
+  const withRec = all.filter((it) => it.status !== 'not_yet').length;
+  const hours = all.reduce((a, it) => a + ((stages[it.id] && stages[it.id].probe && stages[it.id].probe.meta.duration) || 0), 0);
+  return `<section class="tile course ${span}">
+    <header><div><div class="code">${esc(course.code)} · ${esc(course.period)}</div><h2>${esc(course.title)}</h2></div>
+      <div class="count" title="${ready} of ${withRec} recordings ready to watch and search">${ready}/${withRec} ready${hours ? ` · ${fmtHours(hours)}` : ''}</div></header>
+    ${comps
+      .map(
+        ([comp, list]) => `<div class="comp"><span class="tag">${esc(comp)}</span>${esc(list[0].class_code || '')}</div>
+    <div class="sessions">${list
+      .sort((a, b) => a.session_number - b.session_number)
+      .map((it) => sessionTile(base, it, stages[it.id]))
+      .join('')}</div>`
+      )
+      .join('')}
+  </section>`;
+}
 
 function renderDashboard({ base, items, stages, lastScan, scanning, pipe, whisperUp }) {
-  // period → class → session
-  const classes = new Map();
+  // course → component → sessions
+  const courses = new Map();
   for (const it of items) {
-    const key = `${it.period}|${it.class_id}`;
-    if (!classes.has(key)) {
-      classes.set(key, { period: it.period, title: `${it.course_code} — ${it.course_title}`, component: it.component, classCode: it.class_code, sessions: [] });
-    }
-    classes.get(key).sessions.push(it);
+    const key = `${it.period}|${it.course_code}`;
+    if (!courses.has(key)) courses.set(key, { code: it.course_code, title: it.course_title, period: it.period, components: new Map() });
+    const comps = courses.get(key).components;
+    if (!comps.has(it.component)) comps.set(it.component, []);
+    comps.get(it.component).push(it);
   }
 
-  const tables = [...classes.values()]
-    .map(
-      (c) => `
-    <section>
-      <h2>${esc(c.title)} <span class="tag">${esc(c.component)}</span> <span class="muted">${esc(c.classCode)} · ${esc(c.period)}</span></h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Session</th><th>Date</th><th>Recording</th><th>Cut</th><th>Transcript</th></tr></thead>
-        <tbody>${c.sessions
-          .sort((a, b) => a.session_number - b.session_number)
-          .map((it) => {
-            const st = stages[it.id] || {};
-            const ready = it.status === 'downloaded';
-            const n = ready ? `<a href="${sessionHref(base, it.session_id)}">${esc(it.session_number)}</a>` : esc(it.session_number);
-            return `<tr><td>${n}</td><td>${esc(fmtDate(it.session_date))}</td><td>${recCell(base, it, st.probe)}</td>
-              <td>${ready ? cutCell(base, st.cut) : ''}</td><td>${ready ? transcriptCell(base, it, st) : ''}</td></tr>`;
-          })
-          .join('')}</tbody>
-      </table></div>
-    </section>`
-    )
+  // headline numbers
+  let ready = 0, withRec = 0, recSec = 0, keptSec = 0, latest = null;
+  for (const it of items) {
+    const st = stages[it.id] || {};
+    if (it.status !== 'not_yet') withRec++;
+    if (st.probe && st.probe.meta.duration) recSec += st.probe.meta.duration;
+    if (st.cut && st.cut.status === 'done') keptSec += st.cut.meta.keptSec || 0;
+    if (tileState(base, it, st).kind === 'ready') {
+      ready++;
+      if (!latest || String(it.session_date) > String(latest.session_date)) latest = it;
+    }
+  }
+  const pct = withRec ? Math.round((100 * ready) / withRec) : 0;
+  const saved = recSec && keptSec ? Math.round(100 - (100 * keptSec) / recSec) : null;
+
+  const busy = pipe ? Object.entries(pipe.lanes).filter(([, l]) => l.running) : [];
+  const queued = pipe ? Object.values(pipe.lanes).reduce((a, l) => a + l.queued, 0) : 0;
+  const working = !pipe
+    ? '<span class="err">worker not running</span>'
+    : busy.length
+      ? busy.map(([stage, l]) => `${esc(VERB[stage])} ${esc(l.running.label)}`).join('<br>')
+      : 'idle';
+
+  const cards = packCourses([...courses.values()].sort((a, b) => a.code.localeCompare(b.code)))
+    .map(([c, span]) => courseCard(base, c, stages, span))
     .join('');
 
   return layout(
     'Lectures',
-    `<header>
-    <div><h1>Lectures</h1>
-      <div class="muted status">Last scan: ${esc(lastScan || 'never')}${scanning ? ' · <strong>scan running…</strong>' : ''}</div>
-      <div class="muted status">${pipelineLine(pipe, whisperUp)}</div></div>
-    <form method="post" action="${base}/scan"><button type="submit">Scan now</button></form>
-  </header>
-  ${tables || '<p class="muted">Nothing found yet — run a scan.</p>'}
-  <p class="muted" style="margin-top:32px">New recordings are downloaded on each scan, then cut and transcribed. Hover a failed or waiting step to see why.</p>`,
-    { base }
+    `<style>${DASH_STYLE}</style>
+  <div class="bento">
+    <section class="tile hero s4">
+      <h1>Lectures</h1>
+      <div class="muted">Search everything said in class, in English or Indonesian.</div>
+      <form method="get" action="${base}/search" role="search">
+        <input type="search" name="q" placeholder="e.g. how do you compute a confidence interval?" aria-label="Search all lectures">
+        <button>Search</button>
+      </form>
+    </section>
+    <section class="tile s2">
+      <p class="eyebrow">Ready to watch &amp; search</p>
+      <div class="big">${ready}<span class="muted" style="font-size:1rem;font-weight:500"> / ${withRec}</span></div>
+      <div class="bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>
+      <div class="muted status" style="margin-top:8px">${items.length - withRec} session(s) without a recording yet</div>
+    </section>
+    <section class="tile s2">
+      <p class="eyebrow">Recorded</p>
+      <div class="big">${fmtHours(recSec) || '0m'}</div>
+      <div class="muted status" style="margin-top:8px">${keptSec ? `${fmtHours(keptSec)} after cutting silences${saved != null ? ` (${saved}% shorter)` : ''}` : 'Nothing cut yet'}</div>
+    </section>
+    <section class="tile latest s2">
+      <p class="eyebrow">Latest lecture</p>
+      ${
+        latest
+          ? `<a href="${sessionHref(base, latest.session_id)}"><div class="code">${esc(latest.course_code)} · ${esc(latest.component)} · S${esc(latest.session_number)}</div>
+             <div class="title">${esc(latest.course_title)}</div><div class="muted status">${esc(fmtLongDay(latest.session_date))}</div></a>`
+          : '<div class="muted">Nothing transcribed yet.</div>'
+      }
+    </section>
+    <section class="tile sys s2">
+      <p class="eyebrow">System</p>
+      <dl>
+        <dt>Worker</dt><dd><span class="dot ${pipe ? 'on' : 'off'}"></span>${working}${queued ? ` <span class="muted">(+${queued} queued)</span>` : ''}</dd>
+        <dt>Transcriber</dt><dd><span class="dot ${whisperUp ? 'on' : 'off'}"></span>${whisperUp ? 'up' : 'down'}</dd>
+        <dt>Last scan</dt><dd title="${esc(lastScan || '')}">${esc(ago(lastScan))}${scanning ? ' · <strong>scanning…</strong>' : ''}</dd>
+      </dl>
+      <form method="post" action="${base}/scan"><button type="submit"${pipe ? '' : ' disabled title="The worker is not running"'}>Scan now</button></form>
+    </section>
+    ${cards || '<section class="tile s6 muted">Nothing found yet — run a scan.</section>'}
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--ready)"></i>ready</span>
+    <span><i style="background:var(--busy)"></i>in progress / queued</span>
+    <span><i style="background:var(--failed)"></i>failed (hover for why)</span>
+    <span><i style="background:repeating-linear-gradient(135deg, var(--silent) 0 3px, transparent 3px 6px);border:1px solid var(--card-line)"></i>no audio</span>
+    <span><i style="border:1px dashed var(--card-line)"></i>no recording yet</span>
+  </div>`,
+    { base, search: false }
   );
 }
 
@@ -192,6 +340,9 @@ function renderSession({ base, item, stages, segments, spans }) {
     `<header><div>
       <h1>${esc(item.course_code)} — ${esc(item.course_title)} <span class="tag">${esc(item.component)}</span></h1>
       <div class="muted">Session ${esc(item.session_number)} · ${esc(fmtDate(item.session_date))} · ${esc(item.period)}</div>
+      <div class="muted small" style="padding:0;margin-top:4px">Files: <a href="${sources.orig.src}">original</a> (${esc(fmtSize(item.size))})${
+        sources.cut ? ` · <a href="${sources.cut.src}">cut</a>` : ''
+      } · <a href="${base}/recording/${encodeURIComponent(item.session_id)}" target="_blank" rel="noopener">open on SharePoint</a></div>
     </div></header>
   <style>
     main { max-width:80rem; }
