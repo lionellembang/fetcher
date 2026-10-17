@@ -1,6 +1,6 @@
 /**
- * COMPUTE=remote: cut and transcribe run on a compute node (server/node.js on
- * the PC), not here. The worker's stage queues a node job and waits for it:
+ * COMPUTE=remote: cut and transcribe run on a compute node (compute/main.js
+ * on the PC), not here. The worker's stage queues a node job and waits for it:
  *
  *   run()  ─▶ node_jobs row (queued) ─▶ node claims it over /node (leased,
  *              heartbeats) ─▶ uploads results, completes (done / skipped / failed)

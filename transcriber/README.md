@@ -36,6 +36,9 @@ The default model in `run.sh` is `large-v3`; set `WHISPER_MODEL=turbo` for speed
 | `run.sh` | Starts the server; puts `.venv/bin` (and its ffmpeg) on PATH; reads `WHISPER_MODEL`, `HOST`, `PORT` |
 | `transcribe.sh` | Client: uploads each file and writes `<name>.srt` to `$OUT` (default `output/subtitles`) |
 | `requirements.txt` | Pinned Python dependencies |
+| `embedding.py` | Search embeddings (multilingual-e5, CPU): shared by `server.py` and `embed_server.py` |
+| `embed_server.py` | Embedding-only server (`/health`, `/embed`, no Whisper), for a hub whose transcriber is on another machine |
+| `run-embed.sh`, `requirements-embed.txt` | Start it (`VENV`, default `./.venv-embed`; `HOST`, `PORT`) and its dependencies |
 | `.venv/`, `logs/`, `output/` | Environment, logs and results; not tracked by git |
 
 ## Usage
@@ -73,7 +76,7 @@ No authentication, on `127.0.0.1:8000` by default (set `HOST=0.0.0.0` to expose 
 
 **`GET /health`** returns `{"status":"ok","device":"cuda","loaded_models":["large-v3"],"embed_model":"…","embed_loaded":false}` once the model has loaded.
 
-**`POST /embed`** takes JSON `{"texts": [...], "kind": "query"|"passage"}` (1–256 texts) and returns `{"model", "dim", "vectors"}`, normalised. The model (`EMBED_MODEL`, default `intfloat/multilingual-e5-base`) runs on the CPU because large-v3 fills the GPU, loads on first use, and has its own lock, so it answers while a transcription runs. e5's `query: `/`passage: ` prefixes are added for you.
+**`POST /embed`** takes JSON `{"texts": [...], "kind": "query"|"passage"}` (1–256 texts) and returns `{"model", "dim", "vectors"}`, normalised. The model (`EMBED_MODEL`, default `intfloat/multilingual-e5-base`) runs on the CPU because large-v3 fills the GPU, loads on first use, and has its own lock, so it answers while a transcription runs. e5's `query: `/`passage: ` prefixes are added for you. `embed_server.py` serves the same `/embed` (and a `/health` without the Whisper fields) on a machine without a GPU.
 
 **`POST /transcribe`** (waits for the result in the same request; fine for short files and `transcribe.sh`) takes `multipart/form-data`:
 
@@ -161,7 +164,6 @@ Times are wall clock per file, including upload over localhost, decode and VAD.
 - **Outputs are keyed by file name.** If an input is replaced under the same name, the old `.srt` is kept; delete it to redo the file.
 - **Whole videos are uploaded.** Sending 16 kHz mono audio instead would cut the transfer size a lot; the server accepts it unchanged.
 - **No authentication.** Bind to `127.0.0.1` unless you need remote access. WSL2 only exposes ports to Windows localhost by default.
-- **Deprecated startup hook.** `@app.on_event("startup")` should move to a FastAPI `lifespan` handler.
 
 ## To do
 

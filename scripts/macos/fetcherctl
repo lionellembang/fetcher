@@ -1,0 +1,91 @@
+#!/bin/bash
+# Control the hub's launchd services (installed by install-launchd).
+#
+# usage: scripts/macos/fetcherctl start|stop|restart [SERVICE...]   (default: all)
+#        scripts/macos/fetcherctl status
+#        scripts/macos/fetcherctl logs [SERVICE]   follow a log (default: worker + web)
+#
+# SERVICE is embed, worker or web. LaunchDaemons need sudo for start / stop /
+# restart. "stop" lasts until the next start or reboot.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+ALL="embed worker web"   # start order; stop goes in reverse
+label() { echo "fetcher.$1"; }
+
+# Where a service is installed: "system <plist>", "gui/<uid> <plist>", or nothing.
+where() {
+  local p="/Library/LaunchDaemons/$(label "$1").plist"
+  if [ -f "$p" ]; then echo "system $p"; return; fi
+  p="$HOME/Library/LaunchAgents/$(label "$1").plist"
+  if [ -f "$p" ]; then echo "gui/$(id -u) $p"; fi
+}
+loaded() { launchctl print "$1/$(label "$2")" >/dev/null 2>&1; }
+pid_of() { launchctl print "$1/$(label "$2")" 2>/dev/null | awk '$1 == "pid" {print $3; exit}'; }
+
+services() {
+  local s out=""
+  [ $# -eq 0 ] && set -- $ALL
+  for s in "$@"; do
+    case " $ALL " in *" $s "*) out="$out $s" ;; *) echo "unknown service '$s' (one of: $ALL)" >&2; exit 1 ;; esac
+  done
+  echo $out
+}
+in_order() { local s; for s in $ALL; do case " $* " in *" $s "*) echo "$s" ;; esac; done; }
+reverse() { local out="" s; for s in "$@"; do out="$s $out"; done; echo $out; }
+
+control() {  # action service
+  local w domain plist
+  w="$(where "$2")"
+  [ -n "$w" ] || { echo "$2: not installed (run scripts/macos/install-launchd)"; return 1; }
+  domain="${w%% *}"; plist="${w#* }"
+  if [ "$domain" = system ] && [ "$(id -u)" != 0 ]; then echo "$2: a LaunchDaemon; use sudo $0 $1"; return 1; fi
+  case "$1" in
+    start)
+      if loaded "$domain" "$2"; then launchctl kickstart "$domain/$(label "$2")"; else launchctl bootstrap "$domain" "$plist"; fi
+      echo "$2: started" ;;
+    stop)
+      if loaded "$domain" "$2"; then launchctl bootout "$domain/$(label "$2")"; echo "$2: stopped"; else echo "$2: not running"; fi ;;
+    restart)
+      if loaded "$domain" "$2"; then launchctl kickstart -k "$domain/$(label "$2")"; else launchctl bootstrap "$domain" "$plist"; fi
+      echo "$2: restarted" ;;
+  esac
+}
+
+check() {  # name url
+  if curl -sf -m 3 "$2" >/dev/null; then printf "  %-12s up    %s\n" "$1" "$2"; else printf "  %-12s DOWN  %s\n" "$1" "$2"; fi
+}
+
+status() {
+  local s w domain pid
+  for s in $ALL; do
+    w="$(where "$s")"
+    if [ -z "$w" ]; then printf "%-8s not installed\n" "$s"; continue; fi
+    domain="${w%% *}"
+    if loaded "$domain" "$s"; then
+      pid="$(pid_of "$domain" "$s")"
+      if [ -n "$pid" ]; then printf "%-8s running, pid %s (%s)\n" "$s" "$pid" "$domain"
+      else printf "%-8s loaded, not running (crashing? see logs/%s.log) (%s)\n" "$s" "$s" "$domain"; fi
+    else
+      printf "%-8s stopped (%s)\n" "$s" "$domain"
+    fi
+  done
+  if [ -f .env ]; then set -a; . ./.env; set +a; fi
+  echo
+  check search "${EMBED_URL:-http://127.0.0.1:8000}/health"
+  check web "http://127.0.0.1:${PORT:-3100}/healthz"
+  if nc -z -G 2 127.0.0.1 "${NODE_PORT:-3102}" 2>/dev/null; then printf "  %-12s up    port %s (LAN)\n" "node API" "${NODE_PORT:-3102}"; else printf "  %-12s DOWN  port %s\n" "node API" "${NODE_PORT:-3102}"; fi
+  if pgrep -q cloudflared; then printf "  %-12s running (the Mac's own tunnel)\n" cloudflared; else printf "  %-12s NOT running\n" cloudflared; fi
+  echo
+  echo "dashboard: ${PUBLIC_URL:-http://localhost:${PORT:-3100}}/d/<ACCESS_TOKEN>"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  start)   for s in $(in_order $(services "$@")); do control start "$s" || true; done ;;
+  stop)    for s in $(reverse $(in_order $(services "$@"))); do control stop "$s" || true; done ;;
+  restart) for s in $(in_order $(services "$@")); do control restart "$s" || true; done ;;
+  status)  status ;;
+  logs)    mkdir -p logs; if [ $# -eq 0 ]; then exec tail -n 30 -F logs/worker.log logs/web.log; else exec tail -n 50 -F "logs/$(services "$1").log"; fi ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

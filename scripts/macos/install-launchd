@@ -1,0 +1,89 @@
+#!/bin/bash
+# Install the hub's services (embed, worker, web) into launchd, so they start
+# at boot and restart when they crash. It only writes the plists; start them
+# with `fetcherctl start`.
+#
+#   sudo scripts/macos/install-launchd      LaunchDaemons: run at boot, no login
+#                                           needed, as the user who ran sudo
+#   scripts/macos/install-launchd           LaunchAgents: run only while that
+#                                           user is logged in (turn on auto-login)
+#   scripts/macos/install-launchd --uninstall   (with or without sudo) stop and remove them
+#
+# fetcher's public hostname goes through the Mac's existing cloudflared, so
+# there is no tunnel service here.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SERVICES="embed worker web"
+label() { echo "fetcher.$1"; }
+
+if [ "$(id -u)" = 0 ]; then
+  user="${SUDO_USER:-}"
+  [ -n "$user" ] && [ "$user" != root ] || { echo "Run it with sudo from your own account, not as root." >&2; exit 1; }
+  dir="${FETCHER_LAUNCH_DIR:-/Library/LaunchDaemons}"
+  domain=system
+else
+  user="$(id -un)"
+  dir="${FETCHER_LAUNCH_DIR:-$HOME/Library/LaunchAgents}"
+  domain="gui/$(id -u)"
+fi
+home="$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+home="${home:-$HOME}"
+
+if [ "${1:-}" = --uninstall ]; then
+  for s in $SERVICES; do
+    launchctl bootout "$domain/$(label "$s")" 2>/dev/null || true
+    rm -f "$dir/$(label "$s").plist"
+    echo "$(label "$s"): removed"
+  done
+  exit 0
+fi
+
+esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<< "$1"; }
+mkdir -p "$ROOT/logs" "$dir"
+chown "$user" "$ROOT/logs" 2>/dev/null || true
+for s in $SERVICES; do
+  plist="$dir/$(label "$s").plist"
+  {
+    cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$(label "$s")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(esc "$ROOT/scripts/macos/run-service")</string>
+    <string>$s</string>
+  </array>
+  <key>WorkingDirectory</key><string>$(esc "$ROOT")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$(esc "$home")</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$(esc "$ROOT/logs/$s.log")</string>
+  <key>StandardErrorPath</key><string>$(esc "$ROOT/logs/$s.log")</string>
+PLIST
+    if [ "$domain" = system ]; then
+      echo "  <key>UserName</key><string>$(esc "$user")</string>"
+      echo "  <key>GroupName</key><string>staff</string>"
+    fi
+    echo "</dict>"
+    echo "</plist>"
+  } > "$plist"
+  plutil -lint -s "$plist"
+  if [ "$domain" = system ]; then chown root:wheel "$plist"; chmod 644 "$plist"; fi
+  echo "$(label "$s"): $plist"
+done
+echo
+if [ "$domain" = system ]; then
+  echo "Installed as LaunchDaemons (run at boot as $user). Start them: sudo scripts/macos/fetcherctl start"
+else
+  echo "Installed as LaunchAgents (run while $user is logged in; turn on auto-login for a server)."
+  echo "Start them: scripts/macos/fetcherctl start"
+fi

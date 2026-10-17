@@ -127,6 +127,45 @@ glibc with `MALLOC_ARENA_MAX=2`, e5 is tokenized with sentencepiece rather than
 transformers' 360 MB tokenizer, and temp files go to `data/tmp/` on disk
 rather than `/tmp`, which is RAM on this distro.
 
+## Two machines: a Mac hub and a PC compute node
+
+With `COMPUTE=remote`, an always-on Mac (the hub) does everything except cut
+and transcribe, and the PC with the GPU only does those, whenever it's on (see
+"How it works" below and [docs/two-server-plan.md](docs/two-server-plan.md)).
+The two talk over the LAN only.
+
+**Mac (hub).** Tools: `brew install node ffmpeg uv` (plus `cloudflared` if the
+Mac doesn't run a tunnel yet), then:
+
+```bash
+cd server && npm ci && npx playwright install chromium && cd ..
+cd transcriber && uv venv --python 3.12 .venv-embed && uv pip install --python .venv-embed/bin/python -r requirements-embed.txt && cd ..
+```
+
+In the Mac's `.env` (copied from the PC): `COMPUTE=remote`, a new
+`NODE_TOKEN` (`openssl rand -hex 24`), `NODE_PORT=3102`,
+`EMBED_URL=http://127.0.0.1:8000`, and `CLOUDFLARE_TUNNEL=` (empty). Then:
+
+```bash
+sudo scripts/macos/install-launchd   # embed, worker, web as LaunchDaemons: up at boot, restarted on crash
+sudo scripts/macos/fetcherctl start  # start|stop|restart [embed|worker|web]
+scripts/macos/fetcherctl status      # services, health checks, the node API port
+scripts/macos/fetcherctl logs [SERVICE]
+```
+
+Without sudo, `scripts/macos/install-launchd` installs LaunchAgents instead,
+which only run while you're logged in (turn on auto-login). Keep the Mac awake
+(`sudo pmset -a sleep 0 disksleep 0`), give it a fixed LAN address (a DHCP
+reservation), and allow incoming connections for `node` when macOS asks. The
+public hostname goes through the Mac's own cloudflared: with a
+dashboard-managed tunnel, add `lectures.<your-domain>` → `http://127.0.0.1:3100`
+under its Public Hostnames in Cloudflare Zero Trust.
+
+**PC (compute node).** In the PC's `.env`: `FETCHER_SERVICES="transcriber node"`,
+`HUB_URL=http://<mac-lan-ip>:3102`, the Mac's `NODE_TOKEN`, and
+`CLOUDFLARE_TUNNEL=` (empty). `scripts/fetcher start` then runs the transcriber
+and the node agent (`logs/node.log`).
+
 ## Use it
 
 **Dashboard:** `https://lectures.<your-domain>/d/<ACCESS_TOKEN>`
@@ -211,8 +250,9 @@ downloads/2610/COMP6798001 Program Design Methods (LEC)/
   COMP6798001 LEC S01 recording.mp4
   cutted/COMP6798001 LEC S01 recording cutted.mp4
   cutted/COMP6798001 LEC S01 recording cutted.timeline.json
-data/downloads.db      items, stages, transcripts, segments (+ FTS), chunks
+data/downloads.db      items, stages, transcripts, segments (+ FTS), chunks, node jobs
 data/session.json      LMS token (24 h)
+data/node-cache/       on a compute PC: originals kept between jobs (NODE_CACHE_GB)
 ```
 
 ## Commands (in `server/`)
@@ -236,7 +276,14 @@ same recordings.
 - **Transcriber "down" on the dashboard.** Check `logs/transcriber.log`. A WSL
   restart stops everything: run `scripts/fetcher start` again.
 - **"worker not running" on the dashboard.** `scripts/fetcher start worker`;
-  `logs/worker.log` says why it stopped.
+  `logs/worker.log` says why it stopped. On a Mac hub: `scripts/macos/fetcherctl status`.
+- **"Compute PC: offline" / sessions "waiting for PC".** Expected while the PC
+  is off. Otherwise, on the PC: `scripts/fetcher status` and `logs/node.log`.
+  `curl http://<mac-lan-ip>:3102/node/claim` answering 404 means the Mac is
+  reachable (the token is missing on purpose); no answer means the network, the
+  Mac's firewall, or `web` isn't running there.
+- **"Search down" on a Mac hub.** `scripts/macos/fetcherctl status` and
+  `logs/embed.log`; the first search after a start loads the model (~1 GB).
 - **Videos take a minute to start.** Every response is sent `Cache-Control:
   private` so Cloudflare doesn't cache it: on a cache miss Cloudflare pulled the
   whole file (100-700 MB) through the tunnel before answering the small range

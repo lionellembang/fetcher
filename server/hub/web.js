@@ -1,7 +1,7 @@
 /**
  * Web: the frontend. Dashboard, player, search, file streaming and MCP on
  * HOST:PORT (the Cloudflare tunnel points here). Reads the database directly;
- * scans, retries and SharePoint links go to the worker (src/control.js), so
+ * scans, retries and SharePoint links go to the worker (control.js), so
  * this process can be restarted at any time without interrupting work.
  */
 const config = require('./config');

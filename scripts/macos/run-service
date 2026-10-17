@@ -1,0 +1,48 @@
+#!/bin/bash
+# Run one of the hub's services in the foreground: what launchd runs for each
+# (see install-launchd). Works with macOS's bash 3.2.
+#
+#   embed   search embeddings (transcriber/embed_server.py, CPU)   EMBED_URL's port
+#   worker  LMS scan, downloads, probe, index, compute node jobs    127.0.0.1:WORKER_PORT
+#   web     dashboard, files, MCP + the compute node's LAN API     HOST:PORT, NODE_HOST:NODE_PORT
+#
+# usage: scripts/macos/run-service embed|worker|web
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+
+svc="${1:-}"
+case "$svc" in embed|worker|web) ;; *) echo "usage: $0 embed|worker|web" >&2; exit 2 ;; esac
+
+ENV_FILE="${ENV_FILE:-.env}"
+[ -f "$ENV_FILE" ] || { echo "No $ENV_FILE in $ROOT (copy it from the PC, see docs/two-server-plan.md §6)." >&2; exit 1; }
+set -a; . "$ENV_FILE"; set +a
+# launchd starts services with a bare PATH: add Homebrew's (node, ffmpeg).
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# Each service gets its own temp folder on disk, emptied on start.
+data="${DATA_DIR:-./data}"
+case "$data" in /*) ;; *) data="$ROOT/${data#./}" ;; esac
+export TMPDIR="$data/tmp/$svc"
+rm -rf "$TMPDIR"; mkdir -p "$TMPDIR"
+
+# RAM: a small V8 young generation (same as scripts/fetcher on the PC).
+NODE_FLAGS="${NODE_FLAGS:---max-semi-space-size=2 --max-old-space-size=256}"
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
+case "$svc" in
+  embed)
+    url="${EMBED_URL:-${WHISPER_URL:-http://127.0.0.1:8000}}"
+    port="${url##*:}"; port="${port%%/*}"
+    venv="${EMBED_VENV:-./transcriber/.venv-embed}"
+    case "$venv" in /*) ;; *) venv="$ROOT/${venv#./}" ;; esac
+    [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (see transcriber/requirements-embed.txt)." >&2; exit 1; }
+    exec env VENV="$venv" HOST=127.0.0.1 PORT="$port" transcriber/run-embed.sh ;;
+  worker)
+    cd server
+    exec node $NODE_FLAGS hub/worker.js ;;
+  web)
+    if [ "${#ACCESS_TOKEN}" -lt 32 ]; then echo "ACCESS_TOKEN is too short to put on the internet." >&2; exit 1; fi
+    cd server
+    exec node $NODE_FLAGS hub/web.js ;;
+esac
