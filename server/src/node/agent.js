@@ -4,13 +4,12 @@
  *
  *   claim (long poll) → fetch the original into the cache (resumable) →
  *   cut (auto-editor) or transcribe (the local transcriber) with the hub's
- *   settings → upload the results (cut: 64 MiB resumable chunks) → complete
+ *   settings → upload the results (cut: resumable) → complete
  *
  * A heartbeat every 30 s keeps the lease and reports progress; when the hub
  * says the job was cancelled or given away, the work is stopped and dropped.
  * The node calls the hub, never the other way round, so it needs no open
- * ports. HUB_URLS is the hub's LAN address (several are tried in order, and
- * within a job the node sticks to the one that answered).
+ * ports. HUB_URL is the hub's node API on the LAN.
  *
  * Originals stay in NODE_CACHE_DIR (least recently used evicted past
  * NODE_CACHE_GB), so cut and transcribe of one lecture download it once.
@@ -56,50 +55,25 @@ function fileSha256(file) {
   });
 }
 
-async function readRange(file, from, to) {
-  const fh = await fs.promises.open(file, 'r');
-  try {
-    const buf = Buffer.alloc(to - from);
-    let n = 0;
-    while (n < buf.length) {
-      const { bytesRead } = await fh.read(buf, n, buf.length - n, from + n);
-      if (!bytesRead) throw new Error(`${path.basename(file)} is shorter than expected`);
-      n += bytesRead;
-    }
-    return buf;
-  } finally {
-    await fh.close();
-  }
-}
-
-/** The hub's API over HUB_URLS: the preferred URL first, then the others. */
-function createHub({ urls, token, nodeId }) {
-  let current = 0;
+/** The hub's node API at `url`. */
+function createHub({ url, token, nodeId }) {
   const auth = { authorization: `Bearer ${token}`, 'x-node-id': nodeId };
-  const order = () => urls.map((_, k) => urls[(current + k) % urls.length]);
   return {
     auth,
-    /** Start again from the first URL (the LAN), e.g. before each claim. */
-    reset: () => (current = 0),
-    /** Every URL for `pathname`, the one in use first. */
-    urlsFor: (pathname) => order().map((u) => u + pathname),
+    url: (pathname) => url + pathname,
+    /** fetch(), with any failure to get an answer turned into HubUnreachable. */
     async request(method, pathname, { json, body, headers = {}, timeoutMs = 60000 } = {}) {
-      const errors = [];
-      for (const base of order()) {
-        try {
-          const res = await fetch(base + pathname, {
-            method,
-            headers: { ...auth, ...(json ? { 'content-type': 'application/json' } : {}), ...headers },
-            body: json ? JSON.stringify(json) : body,
-            signal: AbortSignal.timeout(timeoutMs),
-          });
-          current = urls.indexOf(base);
-          return res;
-        } catch (err) {
-          errors.push(`${base}: ${err.cause ? err.cause.code || err.cause.message : err.message}`);
-        }
+      try {
+        return await fetch(url + pathname, {
+          method,
+          headers: { ...auth, ...(json ? { 'content-type': 'application/json' } : {}), ...headers },
+          body: json ? JSON.stringify(json) : body,
+          duplex: 'half', // lets an upload stream from the file
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch (err) {
+        throw new HubUnreachable(`hub not reachable at ${url} (${err.cause ? err.cause.code || err.cause.message : err.message})`);
       }
-      throw new HubUnreachable(`no hub reachable (${errors.join('; ')})`);
     },
   };
 }
@@ -171,7 +145,7 @@ async function gpuName() {
 
 function createAgent(options = {}) {
   const o = {
-    hubUrls: config.hubUrls,
+    hubUrl: config.hubUrl,
     token: config.nodeToken,
     nodeId: config.nodeId,
     stages: config.nodeStages,
@@ -191,7 +165,7 @@ function createAgent(options = {}) {
     ...options,
   };
   const log = o.log;
-  const hub = createHub({ urls: o.hubUrls, token: o.token, nodeId: o.nodeId });
+  const hub = createHub({ url: o.hubUrl, token: o.token, nodeId: o.nodeId });
   const cache = createCache(o.cacheDir, o.cacheGb);
   let gpu;
   let stopped = false;
@@ -217,7 +191,6 @@ function createAgent(options = {}) {
     if (health && !transcriberWasUp) log('… transcriber is back');
     transcriberWasUp = !!health;
 
-    hub.reset(); // the first HUB_URL when it works
     const res = await hub.request('POST', '/node/claim', {
       json: { nodeId: o.nodeId, version, stages, info: await info(health), held: cache.held(), waitSec: o.waitSec },
       timeoutMs: (o.waitSec + 20) * 1000,
@@ -259,11 +232,10 @@ function createAgent(options = {}) {
       }
     });
     try {
-      const got = await download(hub.urlsFor(`/node/jobs/${job.id}/source`), dest, {
+      const got = await download([hub.url(`/node/jobs/${job.id}/source`)], dest, {
         expectedSize: size,
         headers: hub.auth,
         resume: true, // a .part left by a restart is continued
-        rotateOnError: true, // with several HUB_URLS: continue through the next one
         notServed: [401, 403, 404, 409],
         attempts: 10,
         retryBaseMs: o.retryMs,
@@ -283,12 +255,12 @@ function createAgent(options = {}) {
     }
   }
 
-  /** Upload `file` as `name` in chunks, resuming from what the hub already has. */
+  /** Upload `file` as `name`, resuming from what the hub already has after a break. */
   async function upload(job, name, file, signal, setMeasure) {
     const size = fs.statSync(file).size;
-    const chunk = job.chunkBytes || 64 * 1024 * 1024;
     let have = 0;
-    setMeasure(() => ({ pct: size ? (100 * have) / size : 100 }));
+    let sent = 0;
+    setMeasure(() => ({ pct: size ? (100 * Math.min(size, have + sent)) / size : 100 }));
     let failures = 0;
     for (;;) {
       if (signal.aborted) throw signal.reason;
@@ -297,27 +269,24 @@ function createAgent(options = {}) {
         if (r.status === 409) throw new LostJob(`upload refused: ${(await r.json().catch(() => ({}))).error || 'job is no longer ours'}`);
         if (!r.ok) throw new Error(`upload size → HTTP ${r.status}`);
         have = (await r.json()).size;
+        sent = 0;
         if (have > size) throw new Error(`the hub has ${have} bytes of ${name}, more than its ${size}`);
         if (have === size) return;
-        const buf = await readRange(file, have, Math.min(have + chunk, size));
+        const rest = fs.createReadStream(file, { start: have });
+        rest.on('data', (c) => (sent += c.length));
         const put = await hub.request('PUT', `/node/jobs/${job.id}/upload/${name}?offset=${have}`, {
-          body: buf,
+          body: rest,
           headers: { 'content-type': 'application/octet-stream' },
-          timeoutMs: 15 * 60000,
+          timeoutMs: 60 * 60000,
         });
         const body = await put.json().catch(() => ({}));
-        if (put.ok) {
-          have = body.size;
-          failures = 0;
-          continue;
-        }
-        if (put.status === 409 && body.size !== undefined) continue; // offset moved or upload in progress: ask again
-        if (put.status === 409) throw new LostJob(`upload refused: ${body.error || 'job is no longer ours'}`);
+        if (put.ok) continue; // the next GET confirms the size
+        if (put.status === 409 && body.size === undefined) throw new LostJob(`upload refused: ${body.error || 'job is no longer ours'}`);
         throw new Error(`upload → HTTP ${put.status}: ${body.error || ''}`);
       } catch (err) {
         if (err instanceof LostJob || signal.aborted) throw err;
         if (++failures > 8) throw err;
-        log(`  … upload of ${name} at ${have} B broke off (${err.message}); retrying`);
+        log(`  … upload of ${name} broke off at about ${have + sent} B (${err.message}); resuming`);
         await sleep(o.retryMs * failures, signal);
       }
     }
@@ -437,7 +406,7 @@ function createAgent(options = {}) {
   }
 
   async function loop() {
-    log(`→ Compute node ${o.nodeId}: ${o.stages.join(' + ')} for ${o.hubUrls.join(', ')}`);
+    log(`→ Compute node ${o.nodeId}: ${o.stages.join(' + ')} for ${o.hubUrl}`);
     let backoff = o.backoffMs[0];
     let down = false;
     while (!stopped) {

@@ -1,7 +1,7 @@
 /**
  * Compute node (runs on the PC, next to the transcriber): pulls cut and
  * transcribe jobs from the hub (COMPUTE=remote on the hub) and runs them.
- * See src/node/agent.js. Needs HUB_URLS and NODE_TOKEN in .env.
+ * See src/node/agent.js. Needs HUB_URL and NODE_TOKEN in .env.
  *
  * Stopping it mid-job is safe: the hub puts the job back in the queue once
  * the lease runs out, or as soon as this node claims again.
@@ -11,8 +11,8 @@ const media = require('./src/media');
 const { createAgent } = require('./src/node/agent');
 
 config.ensureDirs();
-if (!config.hubUrls.length) {
-  console.error('✗ HUB_URLS is empty: set it in .env, e.g. HUB_URLS=http://<mac-lan-ip>:3102');
+if (!config.hubUrl) {
+  console.error('✗ HUB_URL is empty: set it in .env, e.g. HUB_URL=http://<mac-lan-ip>:3102');
   process.exit(1);
 }
 if (config.nodeToken.length < 32) {

@@ -11,7 +11,7 @@
  *                                       → {cancel}; extends the lease
  *   GET  /node/jobs/:id/upload/:name    → {size} received so far (name: video | timeline)
  *   PUT  /node/jobs/:id/upload/:name?offset=N
- *                                       → {size}; appends ≤ 64 MiB; 409 {size} if offset is off
+ *                                       → {size}; appends the body; 409 {size} if offset is off
  *   POST /node/jobs/:id/complete        cut: {files: {video, timeline: {size, sha256}}, meta}
  *                                       transcribe: {result: {segments, language}, meta}
  *   POST /node/jobs/:id/fail {error, silent}
@@ -19,13 +19,13 @@
  * Every call needs "Authorization: Bearer <NODE_TOKEN>" (anything else is a
  * 404) and, on /jobs, "X-Node-Id" of the node holding the lease (else 409).
  * No filesystem path ever comes from the request: they all come from the job
- * and its item. Uploads come in chunks so a broken transfer only redoes the
- * part that was in flight.
+ * and its item. An upload that breaks off keeps what arrived; the node asks
+ * for the size and sends the rest.
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { Transform } = require('stream');
+const { once } = require('events');
 const { pipeline } = require('stream/promises');
 const express = require('express');
 const config = require('./config');
@@ -34,7 +34,6 @@ const cut = require('./cut');
 const remote = require('./remote');
 const { loadTimeline } = require('./timeline');
 
-const CHUNK_BYTES = 64 * 1024 * 1024;
 const MAX_WAIT_SEC = 25;
 const CLAIM_POLL_MS = 1000;
 const UPLOADS = ['video', 'timeline'];
@@ -90,7 +89,6 @@ function jobForNode(job, item) {
     params: job.params,
     item: { id: item.id, label: label(item), rel: item.file_path, size: item.size, probeMeta: probe ? probe.meta : null },
     leaseSec: config.nodeLeaseSec,
-    chunkBytes: CHUNK_BYTES,
   };
 }
 
@@ -173,36 +171,40 @@ function uploadSize(req, res) {
   if (file) res.json({ size: sizeOf(file) });
 }
 
-const busy = new Set(); // partial files with a PUT in progress
+const uploads = new Map(); // partial file → { req, done } of the PUT writing it
 
 async function upload(req, res) {
   const file = uploadTarget(req, res);
   if (!file) return;
   const offset = Number(req.query.offset);
   if (!Number.isSafeInteger(offset) || offset < 0) return res.status(400).json({ error: 'offset is required' });
-  if (Number(req.get('content-length')) > CHUNK_BYTES) return res.status(413).json({ error: `chunks are at most ${CHUNK_BYTES} bytes` });
-  if (busy.has(file)) return res.status(409).json({ error: 'another upload of this file is in progress', size: sizeOf(file) });
+
+  // The node sends one upload at a time, so a PUT still writing this file is
+  // left over from a connection that broke without the hub noticing: end it.
+  const prev = uploads.get(file);
+  if (prev) {
+    prev.req.destroy();
+    await prev.done;
+  }
   const have = sizeOf(file);
   if (offset !== have) return res.status(409).json({ error: `expected offset ${have}`, size: have });
 
-  busy.add(file);
+  let finished;
+  const mine = { req, done: new Promise((resolve) => (finished = resolve)) };
+  uploads.set(file, mine);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const out = fs.createWriteStream(file, { flags: 'a' });
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    let n = 0;
-    const limit = new Transform({
-      transform(chunk, _enc, cb) {
-        n += chunk.length;
-        cb(n > CHUNK_BYTES ? new Error(`chunk larger than ${CHUNK_BYTES} bytes`) : null, chunk);
-      },
-    });
     // Bytes that arrive are appended even if the request breaks off: they're
     // the right bytes, and the node resumes from the size it reads back.
-    await pipeline(req, limit, fs.createWriteStream(file, { flags: 'a' }));
+    await pipeline(req, out);
     res.json({ size: sizeOf(file) });
   } catch (err) {
     if (!res.headersSent && !res.destroyed) res.status(400).json({ error: err.message, size: sizeOf(file) });
   } finally {
-    busy.delete(file);
+    if (!out.closed) await once(out, 'close'); // everything written before the size is read again
+    if (uploads.get(file) === mine) uploads.delete(file);
+    finished();
   }
 }
 
@@ -303,4 +305,11 @@ function createLanApp() {
   return app;
 }
 
-module.exports = { router, createLanApp, enabled, CHUNK_BYTES };
+/** Start the LAN listener. Uploads are whole cut videos, so a request may take a while. */
+function listen(port, host, cb) {
+  const server = createLanApp().listen(port, host, cb);
+  server.requestTimeout = 60 * 60 * 1000;
+  return server;
+}
+
+module.exports = { router, createLanApp, listen, enabled };

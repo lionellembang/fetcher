@@ -129,11 +129,11 @@ Mount the router only on a second listener at `NODE_HOST:NODE_PORT` that serves 
 
 | Endpoint | Behaviour |
 |---|---|
-| `POST /node/claim` `{nodeId, version, stages, info, waitSec≤25}` | Updates `node_last_seen`/`node_info`. Long-polls for up to 25 s. In one transaction, takes the oldest `queued` job of an accepted stage, prioritising cut and transcribe of the same item when the node already holds that original, and sets it `leased`. Returns `{job: {id, stage, params, item: {id, label, rel, size, probeMeta}, leaseSec, chunkBytes: 64 MiB}}` or 204. |
+| `POST /node/claim` `{nodeId, version, stages, info, waitSec≤25}` | Updates `node_last_seen`/`node_info`. Long-polls for up to 25 s. In one transaction, takes the oldest `queued` job of an accepted stage, prioritising cut and transcribe of the same item when the node already holds that original, and sets it `leased`. Returns `{job: {id, stage, params, item: {id, label, rel, size, probeMeta}, leaseSec}}` or 204. |
 | `GET /node/jobs/:id/source` | `res.sendFile` of the original, with Range support. |
 | `POST /node/jobs/:id/heartbeat` `{progress}` | Extends the lease. Returns `{cancel}`. A 409 means the job is no longer this node's. |
 | `GET /node/jobs/:id/upload/:name` | `name` ∈ `video`, `timeline`. Returns `{size}` of the partial upload, so the node can resume. |
-| `PUT /node/jobs/:id/upload/:name?offset=N` | Body ≤ 64 MiB, so a break only redoes one chunk. Appends to `<cutted dir>/.partial_node_<jobId>_<name>`. If `offset` ≠ the current size, returns 409 `{size}`. |
+| `PUT /node/jobs/:id/upload/:name?offset=N` | The rest of the file, streamed. Appends to `<cutted dir>/.partial_node_<jobId>_<name>`; what arrived before a break is kept. A PUT still open for the same file (a dead connection) is ended first. If `offset` ≠ the current size, returns 409 `{size}`. |
 | `POST /node/jobs/:id/complete` | **Cut:** `{files: {video: {size, sha256}, timeline: {size, sha256}}, meta}`. Verifies size and hash, fsyncs, renames over `cutPaths()`, validates the timeline with `timeline.loadTimeline`, stores `result = {outputPath, meta}` and sets the job `done`. **Transcribe:** `{result: {segments, language}, meta}` (body limit about 20 MB), stored as the job `result`. |
 | `POST /node/jobs/:id/fail` `{error, silent}` | Sets the job `skipped` (silent) or `failed`, and removes partials. |
 
@@ -151,7 +151,7 @@ Tests (`server/test/nodeApi.test.js`, same style as `download.test.js`):
 
 | Key | Purpose |
 |---|---|
-| `HUB_URLS` | the Mac's LAN address, e.g. `http://192.168.1.20:3102` (several, comma-separated, are tried in order) |
+| `HUB_URL` | the Mac's node API on the LAN, e.g. `http://192.168.1.20:3102` |
 | `NODE_TOKEN` | — |
 | `NODE_ID` | defaults to the hostname |
 | `NODE_STAGES=cut,transcribe` | — |
@@ -159,13 +159,13 @@ Tests (`server/test/nodeApi.test.js`, same style as `download.test.js`):
 | `NODE_CACHE_GB=20` | LRU cache of originals, so cut and transcribe of the same lecture download it once |
 
 **Loop:**
-1. Claim (long-poll). If no hub URL is reachable, back off from 5 s to 60 s, then retry starting with the first URL.
+1. Claim (long-poll). If the hub isn't reachable, back off from 5 s to 60 s and retry.
 2. Fetch the source into the cache at `item.rel`, resuming and checking the size. First factor the Range/resume/stall loop out of `recordings.httpDownload` into `src/httpfetch.js`, taking plain headers, and use it from both places.
 3. Run the stage. Refactor so the logic is shared, with no DB access on the node:
    - **Cut:** `cut.cutRecording(rel, {downloadDir, edit, margin, extraArgs})`. Its current signature keeps working with config defaults.
    - **Transcribe:** split `transcribe.js` into `transcribeFile(absPath, {language, model, gateDb, loudnorm, duration}) → {segments, language, meta}`, which needs no DB, and the existing `transcribeRecording`, which calls it and then saves. It talks to the PC's own transcriber at `WHISPER_URL` (127.0.0.1:8000).
 4. Heartbeat every 30 s with progress. On `cancel`, stop: `media.killAll()` and drop the job.
-5. Upload with chunked, resumable PUTs, then `complete`. On `SilentError` or a failure, call `fail`.
+5. Upload with resumable PUTs (on a break, ask the hub for the size and send the rest), then `complete`. On `SilentError` or a failure, call `fail`.
 6. Run one job at a time, as with `HEAVY_CONCURRENCY=1` today.
 
 **`scripts/fetcher`** (PC only):
@@ -228,7 +228,7 @@ Tests: an agent test against a fake hub (claim → source → upload-resume → 
    - set the PC `.env` to:
      - `CLOUDFLARE_TUNNEL=` (empty)
      - `FETCHER_SERVICES="transcriber node"`
-     - `HUB_URLS=http://<mac-lan-ip>:3102`
+     - `HUB_URL=http://<mac-lan-ip>:3102`
      - the same `NODE_TOKEN`
    - `scripts/fetcher start`
 6. **Verify** (below). After about a week, the PC's `downloads/` and `data/downloads.db` can be deleted; keep `data/node-cache`.

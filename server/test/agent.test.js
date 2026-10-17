@@ -23,7 +23,7 @@ const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
 /**
  * A stand-in hub: hands out `jobs` in order, serves ORIGINAL (the first
- * transfer breaks off), takes uploads (one PUT breaks off), records the rest.
+ * transfer breaks off), takes uploads (the first PUT breaks off), records the rest.
  */
 function fakeHub(jobs, { cancel = new Set() } = {}) {
   const seen = { claims: [], sourceGets: 0, puts: 0, brokenPuts: 0, beats: [], completes: [], fails: [], uploads: {} };
@@ -53,7 +53,7 @@ function fakeHub(jobs, { cancel = new Set() } = {}) {
     const n = ++seen.puts;
     const parts = [];
     req.on('data', (c) => {
-      if (n === 2) {
+      if (n === 1) {
         // the connection breaks after half of what arrived; that much is kept
         seen.uploads[key(req)] = Buffer.concat([have, c.subarray(0, c.length >> 1)]);
         seen.brokenPuts++;
@@ -62,7 +62,7 @@ function fakeHub(jobs, { cancel = new Set() } = {}) {
       parts.push(c);
     });
     req.on('end', () => {
-      if (n === 2) return;
+      if (n === 1) return;
       seen.uploads[key(req)] = Buffer.concat([have, ...parts]);
       res.json({ size: seen.uploads[key(req)].length });
     });
@@ -86,8 +86,8 @@ function fakeHub(jobs, { cancel = new Set() } = {}) {
 }
 
 const item = { id: 'recording:3', label: 'COMP6 LEC S3', rel: REL, size: ORIGINAL.length, probeMeta: { duration: 60 } };
-const cutJob = (id = 1) => ({ id, stage: 'cut', key: 'k', paramsKey: 'audio:-30dB|0.3s,0.5s', params: { edit: 'audio:-30dB', margin: '0.3s,0.5s', extraArgs: [] }, item, leaseSec: 600, chunkBytes: 64 * 1024 });
-const transcribeJob = (id = 2) => ({ id, stage: 'transcribe', key: 'k2', paramsKey: 'large-v3|id|gate12|loudnorm:quiet', params: { language: 'id', model: 'large-v3', gateDb: 12, loudnorm: false, duration: 60 }, item, leaseSec: 600, chunkBytes: 64 * 1024 });
+const cutJob = (id = 1) => ({ id, stage: 'cut', key: 'k', paramsKey: 'audio:-30dB|0.3s,0.5s', params: { edit: 'audio:-30dB', margin: '0.3s,0.5s', extraArgs: [] }, item, leaseSec: 600 });
+const transcribeJob = (id = 2) => ({ id, stage: 'transcribe', key: 'k2', paramsKey: 'large-v3|id|gate12|loudnorm:quiet', params: { language: 'id', model: 'large-v3', gateDb: 12, loudnorm: false, duration: 60 }, item, leaseSec: 600 });
 
 /** A stub cut: checks it got the original and the hub's settings, writes outputs like cut.js does. */
 async function stubCut(rel, opts) {
@@ -100,9 +100,9 @@ async function stubCut(rel, opts) {
   return { outputPath: out.video, meta: { timeline: out.timeline, size: CUT.length, duration: 40, keptSec: 40, keptPct: 66.7 } };
 }
 
-function agentFor(hubUrls, cacheDir, extra = {}) {
+function agentFor(hubUrl, cacheDir, extra = {}) {
   return createAgent({
-    hubUrls,
+    hubUrl,
     token: TOKEN,
     nodeId: 'pc',
     stages: ['cut', 'transcribe'],
@@ -129,8 +129,7 @@ test('claim → source (resumed) → cut → upload (resumed) → complete, then
   const hub = await fakeHub([cutJob(1), transcribeJob(2)]);
   t.after(hub.close);
   const cacheDir = path.join(dir, 'cache1');
-  // the first URL (the "LAN") is down: the agent falls back to the second
-  const agent = agentFor(['http://127.0.0.1:9', hub.base], cacheDir);
+  const agent = agentFor(hub.base, cacheDir);
 
   assert.equal(await agent.step(), true);
   assert.equal(hub.seen.sourceGets, 2, 'the broken transfer was resumed');
@@ -160,7 +159,7 @@ test('a job the hub cancels is stopped and dropped, not completed or failed', as
   t.after(hub.close);
   let killed;
   const stopped = new Promise((resolve) => (killed = resolve));
-  const agent = agentFor([hub.base], path.join(dir, 'cache2'), {
+  const agent = agentFor(hub.base, path.join(dir, 'cache2'), {
     killAll: () => killed(),
     cutRecording: async () => {
       await stopped; // "auto-editor" runs until it's killed
@@ -176,7 +175,7 @@ test('a job the hub cancels is stopped and dropped, not completed or failed', as
 test('silent → reported as skipped; other errors as failed', async (t) => {
   const hub = await fakeHub([cutJob(8), transcribeJob(9)]);
   t.after(hub.close);
-  const agent = agentFor([hub.base], path.join(dir, 'cache3'), {
+  const agent = agentFor(hub.base, path.join(dir, 'cache3'), {
     cutRecording: async () => {
       throw new cut.SilentError('nothing louder than -30dB');
     },
@@ -195,14 +194,14 @@ test('silent → reported as skipped; other errors as failed', async (t) => {
 test('only cut jobs are claimed while the transcriber is down', async (t) => {
   const hub = await fakeHub([]);
   t.after(hub.close);
-  const agent = agentFor([hub.base], path.join(dir, 'cache4'), { transcriberHealth: async () => null });
+  const agent = agentFor(hub.base, path.join(dir, 'cache4'), { transcriberHealth: async () => null });
   assert.equal(await agent.step(), false);
   assert.deepEqual(hub.seen.claims[0].stages, ['cut']);
   assert.equal(hub.seen.claims[0].info.transcriber, 'down');
 });
 
 test('no reachable hub → HubUnreachable', async () => {
-  const agent = agentFor(['http://127.0.0.1:9'], path.join(dir, 'cache5'));
+  const agent = agentFor('http://127.0.0.1:9', path.join(dir, 'cache5'));
   await assert.rejects(agent.step(), HubUnreachable);
 });
 

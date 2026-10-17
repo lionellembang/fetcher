@@ -24,7 +24,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   expectedSize   checked when given; a shorter file is resumed
  *   headers        object, or async (origin) => object, asked again on every attempt
  *   resume         keep a .part from before and continue it (default: start over)
- *   rotateOnError  after a broken attempt, resume from the next URL (mirrors of one file)
  *   notServed      HTTP statuses that mean "won't serve it" (default 401, 403, 404)
  *   signal         AbortSignal that stops the download
  */
@@ -39,7 +38,6 @@ async function download(
     stallMs = 90000,
     timeoutMs = 90 * 60000,
     resume = false,
-    rotateOnError = false,
     notServed = [401, 403, 404],
     signal,
     log = console.log,
@@ -59,7 +57,6 @@ async function download(
     if (Date.now() > deadline) throw new Error(`download took longer than ${minutes} min`);
     const have = fs.existsSync(part) ? fs.statSync(part).size : 0;
     if (attempt > 1) {
-      if (rotateOnError && url) url = urls[(urls.indexOf(url) + 1) % urls.length];
       log(`  … resuming at ${have} B (attempt ${attempt}/${attempts}): ${lastErr.message}`);
       await sleep(retryBaseMs * attempt);
     }

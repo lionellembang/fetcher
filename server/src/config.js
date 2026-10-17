@@ -129,8 +129,8 @@ const config = {
   // A leased job goes back to the queue when its node hasn't sent a heartbeat for this long.
   nodeLeaseSec: int(process.env.NODE_LEASE_SEC, 600),
 
-  // Compute node: hubs to try in order (LAN first, then the public URL).
-  hubUrls: list(process.env.HUB_URLS).map((u) => u.replace(/\/+$/, '')),
+  // Compute node: the hub's node API on the LAN, e.g. http://192.168.1.20:3102
+  hubUrl: String(process.env.HUB_URL || '').trim().replace(/\/+$/, ''),
   nodeId: process.env.NODE_ID || os.hostname(),
   nodeStages: list(process.env.NODE_STAGES || 'cut,transcribe'),
   nodeCacheDir: path.resolve(REPO, process.env.NODE_CACHE_DIR || './data/node-cache'),

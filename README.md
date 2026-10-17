@@ -198,7 +198,7 @@ jobs for a compute PC. The PC runs `scripts/fetcher start` with
 `FETCHER_SERVICES="transcriber node"`; its node agent (`server/node.js`) claims a
 job over the hub's `/node` API (`NODE_TOKEN`; LAN only, on `NODE_PORT`, never
 through the tunnel), downloads the original once into `data/node-cache`, runs the
-work with the hub's settings, uploads the result in resumable 64 MiB chunks and
+work with the hub's settings, uploads the result (resuming after a break) and
 reports back. The PC only ever calls out, so it needs no open ports. While it's
 off, the dashboard shows "waiting for PC"; a job interrupted by a shutdown goes
 back in the queue when its lease (`NODE_LEASE_SEC`) runs out. Search on the hub
@@ -223,7 +223,7 @@ npm run scan                      # one LMS scan, no server
 npm run recordings [-- <sessionId>]   # only download
 npm run pipeline [-- <sessionId>]     # process downloaded recordings (all, or some) and exit
 npm run login                     # force a fresh login (HEADFUL=true to watch)
-npm run node                      # compute node agent in the foreground (HUB_URLS, NODE_TOKEN)
+npm run node                      # compute node agent in the foreground (HUB_URL, NODE_TOKEN)
 npm run embed-parity [-- 200]     # compare stored vectors with what EMBED_URL returns now
 ```
 

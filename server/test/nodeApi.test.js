@@ -137,7 +137,6 @@ test('claim leases the oldest queued job; an expired lease goes back to the queu
   assert.equal(first.body.job.id, ja.id);
   assert.equal(first.body.job.item.rel, a.file_path);
   assert.equal(first.body.job.item.probeMeta.duration, 60);
-  assert.equal(first.body.job.chunkBytes, 64 * 1024 * 1024);
   assert.equal(store.getNodeJob(ja.id).status, 'leased');
   assert.ok(remote.nodeState().online);
 
@@ -252,6 +251,30 @@ test('cut: source with Range, an upload resumed after a broken chunk, complete p
   assert.equal(r.meta.timeline, out.timeline);
   assert.equal(r.meta.keptPct, 73.3);
   assert.equal(r.meta.node, 'pc');
+});
+
+test('a PUT left hanging by a dead connection is ended by the next one', async () => {
+  const item = addRecording();
+  const { job } = queue(item, 'cut');
+  await claim('pc');
+  const video = crypto.randomBytes(512 * 1024);
+  // a PUT that sends some bytes and then goes silent (cable pulled: the hub doesn't notice)
+  const stale = http.request(new URL(`${lan.base}/node/jobs/${job.id}/upload/video?offset=0`), {
+    method: 'PUT',
+    headers: { ...AUTH, 'x-node-id': 'pc', 'content-length': video.length },
+  });
+  stale.on('error', () => {});
+  await new Promise((resolve) => stale.write(video.subarray(0, 100 * 1024), () => setTimeout(resolve, 100)));
+
+  const have = (await api('GET', `/node/jobs/${job.id}/upload/video`)).body.size;
+  const r = await api('PUT', `/node/jobs/${job.id}/upload/video?offset=${have}`, { body: video.subarray(have) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.size, video.length);
+  await uploadAll(job.id, 'timeline', Buffer.from(TIMELINE));
+  const files = { video: { size: video.length, sha256: sha(video) }, timeline: { size: TIMELINE.length, sha256: sha(Buffer.from(TIMELINE)) } };
+  assert.equal((await api('POST', `/node/jobs/${job.id}/complete`, { json: { files } })).status, 200);
+  assert.ok(fs.readFileSync(path.join(dir, cut.cutPaths(item.file_path).video)).equals(video));
+  stale.destroy();
 });
 
 test('a hash mismatch is rejected and the upload starts over', async () => {

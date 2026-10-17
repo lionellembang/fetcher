@@ -278,7 +278,7 @@ function startServer() {
   });
   if (config.compute === 'remote') {
     if (nodeApi.enabled()) {
-      nodeApi.createLanApp().listen(config.nodePort, config.nodeHost, () =>
+      nodeApi.listen(config.nodePort, config.nodeHost, () =>
         console.log(`→ Compute node API on http://${config.nodeHost}:${config.nodePort}/node (LAN only)`)
       );
     } else {
