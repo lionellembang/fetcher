@@ -209,18 +209,55 @@ not require an MFA prompt that a headless browser can't answer.
 
 ## Layout
 
+The code is split by the machine it runs on. `test/boundary.test.js` keeps it
+that way: `shared/` imports neither side, and `hub/` and `compute/` never import
+each other (`compute/` uses no npm packages, so the PC needs none of the hub's).
+
+**`shared/`**: used by both machines.
+
 | File | Role |
 |---|---|
-| `index.js` | Boots the server, the scan scheduler, and a startup scan. |
-| `src/config.js` | Reads `.env`; resolves paths. |
-| `src/browser.js` | Cold Chromium launch per login attempt / download batch + guaranteed shutdown. |
-| `src/login.js` | Playwright login; captures the LMS API headers. |
-| `src/session.js` | Saved session; logs in only when it's unusable; one login at a time. |
-| `src/lms.js` | LMS HTTP client (session headers, `401` → re-login + retry once). |
-| `src/scan.js` | The scan: catalog walk and recording detection, then recording downloads. |
-| `src/recordings.js` | SharePoint recording downloads in Playwright (sign-in + browser download). |
-| `src/store.js` | SQLite (`node:sqlite`) item store. |
-| `src/server.js` / `src/page.js` | Express routes and the dashboard HTML. |
+| `env.js` | Reads `.env`; settings both machines use (data folder, tools, `WHISPER_URL`) and the parsers the two configs build on. |
+| `media.js` | Runs ffmpeg / auto-editor; file duration; 16 kHz audio for Whisper. |
+| `cut.js` | Silence-cut with auto-editor, with the settings it's given; `cutPaths`. |
+| `transcribe.js` | Transcribe a file with the local Whisper server (stores nothing). |
+| `whisper.js` | HTTP client for the transcriber. |
+| `timeline.js` | Map times between an original and its cut. |
+| `httpfetch.js` | Resumable HTTP download (Range, stall detection, retries). |
+
+**`hub/`**: the always-on machine (with `COMPUTE=local`, the whole system on one box).
+
+| File | Role |
+|---|---|
+| `worker.js` / `web.js` / `index.js` | Entry points: the backend, the frontend, or both in one process. |
+| `embed-parity.js` | Compare stored vectors with what `EMBED_URL` returns now. |
+| `config.js` | The hub's settings, on top of `shared/env.js`. |
+| `browser.js` | Cold Chromium launch per login attempt / download batch + guaranteed shutdown. |
+| `login.js` | Playwright login; captures the LMS API headers. |
+| `session.js` | Saved session; logs in only when it's unusable; one login at a time. |
+| `lms.js` | LMS HTTP client (session headers, `401` → re-login + retry once). |
+| `scan.js` | The scan: catalog walk and recording detection, then recording downloads. |
+| `recordings.js` | SharePoint recording downloads in Playwright (sign-in + browser download). |
+| `store.js` | SQLite (`node:sqlite`): items, stages, transcripts, chunks, node jobs. |
+| `pipeline.js` | probe → cut / transcribe → index, one lane per stage. |
+| `probe.js` | Duration and loudness; the silent / quiet thresholds. |
+| `settings.js` | The settings cut and transcribe run with, and their keys. |
+| `remote.js` | `COMPUTE=remote`: cut / transcribe as jobs for the compute node. |
+| `nodeApi.js` | The compute node's API, on its own LAN listener. |
+| `indexer.js` / `embed.js` | Search chunks and their embeddings (`EMBED_URL`). |
+| `transcripts.js` | Saving, timelines, search. |
+| `server.js` / `page.js` / `mcp.js` | Express routes, dashboard HTML, MCP. |
+| `control.js` / `events.js` | Web → worker commands; in-process events. |
+
+**`compute/`**: the compute node (PC).
+
+| File | Role |
+|---|---|
+| `main.js` | Entry point. |
+| `config.js` | The node's settings (`HUB_URL`, `NODE_TOKEN`, cache), on top of `shared/env.js`. |
+| `agent.js` | Claim a job, fetch the original, cut or transcribe, upload, complete. |
+| `hubClient.js` | Requests to the hub's node API. |
+| `cache.js` | Originals kept between jobs (LRU). |
 
 ## Extending
 

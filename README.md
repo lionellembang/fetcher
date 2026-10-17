@@ -8,12 +8,12 @@ lecture, the timestamp and a link that opens the video at that moment.
 ```
 scripts/fetcher start            (each service can be started/stopped/restarted on its own)
  ├─ transcriber  transcriber/        Whisper large-v3 (GPU) + text embeddings (CPU)        :8000
- ├─ worker       server/worker.js    the backend: LMS scan → download → pipeline           :3101 (local)
+ ├─ worker       server/hub/worker.js  the backend: LMS scan → download → pipeline         :3101 (local)
  │    scan (every 6 h) ─▶ download (Playwright, SharePoint)
  │                          └─▶ probe (loudness, duration)
  │                                ├─▶ cut (auto-editor)          → video for watching
  │                                └─▶ transcribe (original audio) ─▶ index (embeddings)
- ├─ web          server/web.js       the frontend: dashboard, player, search, files, MCP   :3100
+ ├─ web          server/hub/web.js     the frontend: dashboard, player, search, files, MCP :3100
  └─ tunnel       cloudflared         https://lectures.<your-domain> → 127.0.0.1:3100
 ```
 
@@ -25,7 +25,7 @@ dashboard, search and MCP keep working; actions just say the worker isn't runnin
 
 The three original repos live here as git subtrees with their history:
 `server/` (downloadrecord), `transcriber/` (transcription), `cutting/` (the
-silence-cut notes and tools; the cut logic itself now lives in `server/src/cut.js`).
+silence-cut notes and tools; the cut logic itself now lives in `server/shared/cut.js`).
 
 ## Setup (once)
 
@@ -159,12 +159,12 @@ transcripts and watch the recordings. Treat it like a password; changing
 
 ## How it works
 
-**Scan and download** (`server/src/scan.js`, `recordings.js`): see
+**Scan and download** (`server/hub/scan.js`, `recordings.js`): see
 [server/README.md](server/README.md) for the LMS API and SharePoint sign-in. After
 the browser signs in, files are downloaded over plain HTTP with its cookies, and
 a broken or stalled transfer resumes where it stopped (up to 6 attempts).
 
-**Pipeline** (`server/src/pipeline.js`): each downloaded recording goes through
+**Pipeline** (`server/hub/pipeline.js`): each downloaded recording goes through
 four steps, each with its own queue. Cut and transcribe can run at the same time
 (CPU vs. GPU, limit `HEAVY_CONCURRENCY`).
 
@@ -182,10 +182,10 @@ use, so changing them redoes nothing. Failed steps are retried on the next scan 
 If the transcriber is down, transcribe and index wait and retry every minute.
 
 **Timestamps**: transcripts are stored once, on the original's timeline. The cut's
-timeline file maps them onto the cut video (`server/src/timeline.js`). The same
+timeline file maps them onto the cut video (`server/shared/timeline.js`). The same
 functions run in the browser, so the transcript follows either video.
 
-**Search** (`server/src/transcripts.js`): semantic (cosine vs. every chunk) and
+**Search** (`server/hub/transcripts.js`): semantic (cosine vs. every chunk) and
 keyword (FTS5 bm25) rankings fused with reciprocal rank fusion. Labels: a passage
 is `strong`/`possible` when its cosine clears a floor and, once 200+ chunks are
 indexed, it stands out from that query's average by a z-score. The thresholds
@@ -195,7 +195,7 @@ some covered in lectures and some not.
 **Two machines** (`COMPUTE=remote`, plan in [docs/two-server-plan.md](docs/two-server-plan.md)):
 an always-on hub does everything except cut and transcribe, which it queues as
 jobs for a compute PC. The PC runs `scripts/fetcher start` with
-`FETCHER_SERVICES="transcriber node"`; its node agent (`server/node.js`) claims a
+`FETCHER_SERVICES="transcriber node"`; its node agent (`server/compute/`) claims a
 job over the hub's `/node` API (`NODE_TOKEN`; LAN only, on `NODE_PORT`, never
 through the tunnel), downloads the original once into `data/node-cache`, runs the
 work with the hub's settings, uploads the result (resuming after a break) and

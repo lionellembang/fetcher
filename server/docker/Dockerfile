@@ -21,4 +21,4 @@ RUN mkdir -p /app/data /app/downloads
 VOLUME ["/app/data", "/app/downloads"]
 
 EXPOSE 3100
-CMD ["node", "index.js"]
+CMD ["node", "hub/index.js"]

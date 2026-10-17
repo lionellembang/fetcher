@@ -72,9 +72,9 @@ cmd_for() {
       [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (set TRANSCRIBER_VENV)." >&2; return 1; }
       port="${WHISPER_URL##*:}"; port="${port%%/*}"
       echo "env VENV=$venv HOST=127.0.0.1 PORT=$port transcriber/run.sh" ;;
-    worker) echo "env -C server node $NODE_FLAGS worker.js" ;;
-    web)    echo "env -C server node $NODE_FLAGS web.js" ;;
-    node)   echo "env -C server node $NODE_FLAGS node.js" ;;
+    worker) echo "env -C server node $NODE_FLAGS hub/worker.js" ;;
+    web)    echo "env -C server node $NODE_FLAGS hub/web.js" ;;
+    node)   echo "env -C server node $NODE_FLAGS compute/main.js" ;;
     tunnel) echo "cloudflared tunnel --no-autoupdate run ${CLOUDFLARE_TUNNEL}" ;;
   esac
 }
@@ -193,7 +193,7 @@ case "$cmd" in
     check web
     echo "web in the foreground, restarting whenever a file it loads changes (Ctrl-C to stop; 'scripts/fetcher start web' to go back)"
     rm -rf "${TMP:?}/web"; mkdir -p "$TMP/web"; export TMPDIR="$TMP/web"
-    cd server && exec node $NODE_FLAGS --watch web.js ;;
+    cd server && exec node $NODE_FLAGS --watch hub/web.js ;;
   mem)     exec "$ROOT/scripts/memwatch" "$@" ;;
   *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -3,6 +3,12 @@
 Handoff for the agent on the Mac. The repo is `github.com/lionellembang/fetcher`
 (`main` is current). Read `README.md` first for how the system works today.
 
+> **Since built:** §1–§4 are on the `two-server` branch, and the code has since
+> been split by machine: `server/shared/` (both), `server/hub/` (Mac) and
+> `server/compute/` (PC); see `server/README.md` → Layout. Paths below such as
+> `src/pipeline.js` are from before that split (now `hub/pipeline.js`,
+> `shared/cut.js`, `compute/agent.js`, …).
+
 ## Context
 
 fetcher runs entirely on one Windows PC under WSL2 with an RTX 5070. It does the following:
