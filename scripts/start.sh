@@ -6,5 +6,5 @@
 set -euo pipefail
 F="$(dirname "$0")/fetcher"
 "$F" start all
-echo; echo "Following the worker and web logs. Ctrl-C stops following; services keep running."
+echo; echo "Following the logs. Ctrl-C stops following; services keep running."
 exec "$F" logs

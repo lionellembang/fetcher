@@ -1,5 +1,10 @@
 # gapless-pipeline
 
+> **Archived research notes** from the original gapless-pipeline repo, kept for
+> how the cut settings were chosen. Paths below are that repo's. fetcher's
+> actual cut is `server/shared/cut.js`, with the settings from this run
+> (`CUT_EDIT=audio:-30dB`, `CUT_MARGIN=0.3s,0.5s` in `.env`).
+
 Batch silence-cutting for lecture recordings, using **auto-editor** (the engine behind the Gapless Mac app). This is the "cut" stage of a planned discover → cut → transcribe program; this README doubles as the reference notes from the first full run (Oct 8–10, 2026).
 
 ## Quick start

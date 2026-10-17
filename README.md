@@ -5,17 +5,31 @@ silences, transcribes them, and lets you search them, both in a web dashboard
 and from Claude over MCP. Ask "where did the lecturer explain X?" and get the
 lecture, the timestamp and a link that opens the video at that moment.
 
+It runs on two machines: an always-on **Mac (the hub)** and the **PC with the
+GPU (the compute node)**, which only cuts and transcribes, whenever it's on.
+
 ```
-scripts/fetcher start            (each service can be started/stopped/restarted on its own)
- ├─ transcriber  server/compute/transcriber/  Whisper large-v3 (GPU) + text embeddings (CPU) :8000
- ├─ worker       server/hub/worker.js  the backend: LMS scan → download → pipeline         :3101 (local)
+Mac: hub, always on (launchd: scripts/macos/fetcherctl)
+ ├─ worker   server/hub/worker.js        the backend                              :3101 (local)
  │    scan (every 6 h) ─▶ download (Playwright, SharePoint)
  │                          └─▶ probe (loudness, duration)
- │                                ├─▶ cut (auto-editor)          → video for watching
- │                                └─▶ transcribe (original audio) ─▶ index (embeddings)
- ├─ web          server/hub/web.js     the frontend: dashboard, player, search, files, MCP :3100
- └─ tunnel       cloudflared         https://lectures.<your-domain> → 127.0.0.1:3100
+ │                                ├─▶ cut ─────────────┐ queued as jobs for the PC
+ │                                └─▶ transcribe ──────┘ ─▶ index (embeddings, on the Mac)
+ ├─ web      server/hub/web.js           dashboard, player, search, files, MCP    :3100
+ │                                       + the compute node's API (LAN only)      :3102
+ ├─ embed    server/hub/embed-server/    search embeddings (CPU)                  :8000
+ └─ the Mac's own cloudflared            https://lectures.<your-domain> → 127.0.0.1:3100
+
+PC: compute node, when it's on (scripts/fetcher start, FETCHER_SERVICES="transcriber node")
+ ├─ node         server/compute/main.js        claim a job over the LAN → fetch the original
+ │                                             → cut (auto-editor) or transcribe → upload
+ └─ transcriber  server/compute/transcriber/   Whisper large-v3 (GPU)            :8000
 ```
+
+Everything can also run on one machine (`COMPUTE=local`, the default): then
+`scripts/fetcher start` runs transcriber, worker, web and a tunnel on the GPU
+machine, and the worker cuts and transcribes itself. That's how it ran before
+the Mac took over, and the setup below still covers it.
 
 The worker is the only part that writes pipeline state or talks to the LMS. The
 web part reads the shared SQLite database directly and sends the few actions
@@ -30,9 +44,12 @@ with its search embeddings split into `server/shared/embedding/` and
 `docs/cutting/`; the cut logic itself lives in `server/shared/cut.js`). The code
 is laid out by the machine that runs it; see [server/README.md](server/README.md) → Layout.
 
-## Setup (once)
+## Setup: one machine, or the compute PC
 
-This runs on the WSL2 machine with the NVIDIA GPU.
+On the WSL2 machine with the NVIDIA GPU. As a compute node it needs only Node,
+ffmpeg, auto-editor and the transcriber; Chromium, the Cloudflare tunnel and
+the config below are for running everything on this one machine. For the
+two-machine setup, see the next sections.
 
 **Tools** go into `~/.local/bin` (no sudo):
 
@@ -83,15 +100,15 @@ EOF
 
 Set `PUBLIC_URL=https://lectures.<your-domain>` and `CLOUDFLARE_TUNNEL=fetcher` in `.env`.
 
-## Run
+## Run (one machine, or the compute PC)
 
 ```bash
-scripts/fetcher start              # everything: transcriber, worker, web, tunnel
+scripts/fetcher start              # everything in FETCHER_SERVICES (default: transcriber, worker, web, tunnel)
 scripts/fetcher status             # what's running
 scripts/fetcher restart web        # after changing the dashboard/MCP code (pipeline keeps going)
 scripts/fetcher restart worker     # after changing scan/pipeline code
 scripts/fetcher stop [SERVICE]     # one service, or everything
-scripts/fetcher logs [SERVICE]     # follow logs (default: worker + web)
+scripts/fetcher logs [SERVICE]     # follow logs (default: worker + web, or node on a compute PC)
 scripts/fetcher dev                # web in the foreground, reloading on every code change
 scripts/fetcher mem [SECONDS]      # sample RAM per service; prints the peaks on Ctrl-C
 ```
@@ -102,8 +119,8 @@ following the logs). The worker scans the LMS when it starts, then every
 `SCAN_INTERVAL_MINUTES`. Stopping the worker or transcriber redoes only the step
 that was running; stopping web or tunnel interrupts nothing.
 
-Logs are in `logs/` (`worker.log`, `web.log`, `transcriber.log`, `tunnel.log`),
-pid files in `run/`.
+Logs are in `logs/` (`worker.log`, `web.log`, `transcriber.log`, `tunnel.log`,
+`node.log`), pid files in `run/`.
 
 ### Memory
 
@@ -111,8 +128,8 @@ pid files in `run/`.
 included, page cache excluded); `mem` samples it every 0.5 s and prints peaks
 plus "WSL in use", the number to size `.wslconfig`'s `memory=` from.
 
-Measured with all 45 lectures transcribed, serving dashboard, search, MCP and
-video from 4 parallel clients (Oct 2026):
+Measured on the single WSL2 machine, with all 45 lectures transcribed, serving
+dashboard, search, MCP and video from 4 parallel clients (Oct 2026):
 
 | service | idle | serving |
 |---|---|---|
@@ -130,7 +147,7 @@ glibc with `MALLOC_ARENA_MAX=2`, e5 is tokenized with sentencepiece rather than
 transformers' 360 MB tokenizer, and temp files go to `data/tmp/` on disk
 rather than `/tmp`, which is RAM on this distro.
 
-## Two machines: a Mac hub and a PC compute node
+## Setup: two machines (a Mac hub and a PC compute node)
 
 With `COMPUTE=remote`, an always-on Mac (the hub) does everything except cut
 and transcribe, and the PC with the GPU only does those, whenever it's on (see
@@ -156,13 +173,20 @@ scripts/macos/fetcherctl status      # services, health checks, the node API por
 scripts/macos/fetcherctl logs [SERVICE]
 ```
 
-Without sudo, `scripts/macos/install-launchd` installs LaunchAgents instead,
-which only run while you're logged in (turn on auto-login). Keep the Mac awake
+Logs are in `logs/` (`embed.log`, `worker.log`, `web.log`). Without sudo,
+`scripts/macos/install-launchd` installs LaunchAgents instead, which only run
+while you're logged in (turn on auto-login). Keep the Mac awake
 (`sudo pmset -a sleep 0 disksleep 0`), give it a fixed LAN address (a DHCP
 reservation), and allow incoming connections for `node` when macOS asks. The
 public hostname goes through the Mac's own cloudflared: with a
 dashboard-managed tunnel, add `lectures.<your-domain>` → `http://127.0.0.1:3100`
-under its Public Hostnames in Cloudflare Zero Trust.
+under its Public Hostnames in Cloudflare Zero Trust. If that hostname already
+had a DNS record (pointing at another tunnel), make sure it ends up as a
+proxied CNAME to `<the Mac's tunnel id>.cfargotunnel.com`, or Cloudflare
+answers error 1033.
+
+Moving an existing single-machine install over (database, recordings, `.env`)
+is described step by step in [docs/two-server-plan.md](docs/two-server-plan.md) §6.
 
 **PC (compute node).** In the PC's `.env`: `FETCHER_SERVICES="transcriber node"`,
 `HUB_URL=http://<mac-lan-ip>:3102`, the Mac's `NODE_TOKEN`, and
@@ -172,8 +196,10 @@ and the node agent (`logs/node.log`).
 ## Use it
 
 **Dashboard:** `https://lectures.<your-domain>/d/<ACCESS_TOKEN>`
-- One table per class: recording, cut (with % kept) and transcript status per
-  session. Hover "failed" or "waiting" to see why.
+- One card per class with a tile per session: ready, in progress, "waiting for
+  PC" (the compute PC is off), failed, no audio, or no recording yet. Hover a
+  tile for details (why it failed, % kept by the cut). The System tile shows
+  the worker, the compute PC (online, last seen) and search.
 - Session page: the original or the cut video next to its transcript. Click a
   line to jump there; the current line follows playback in either video.
   SRT/VTT/TXT downloads, and **Redo** buttons for each step.
@@ -207,8 +233,10 @@ the browser signs in, files are downloaded over plain HTTP with its cookies, and
 a broken or stalled transfer resumes where it stopped (up to 6 attempts).
 
 **Pipeline** (`server/hub/pipeline.js`): each downloaded recording goes through
-four steps, each with its own queue. Cut and transcribe can run at the same time
-(CPU vs. GPU, limit `HEAVY_CONCURRENCY`).
+four steps, each with its own queue. On one machine, cut and transcribe can run
+at the same time (CPU vs. GPU, limit `HEAVY_CONCURRENCY`). With `COMPUTE=remote`
+they're jobs for the compute PC, which runs one at a time with the hub's
+settings; probe and index stay on the hub.
 
 | Step | What | Output |
 |---|---|---|
@@ -221,7 +249,9 @@ Every step records the settings it ran with. Change a setting (say `CUT_MARGIN`)
 and that step is redone for every recording on the next start. A redone
 transcript also redoes its search index; the loudness thresholds are applied on
 use, so changing them redoes nothing. Failed steps are retried on the next scan or restart, or with **Redo**.
-If the transcriber is down, transcribe and index wait and retry every minute.
+If the transcriber (or, on a hub, the embedding server) is down, transcribe and
+index wait and retry every minute; with the compute PC off, cut and transcribe
+wait for it.
 
 **Timestamps**: transcripts are stored once, on the original's timeline. The cut's
 timeline file maps them onto the cut video (`server/shared/timeline.js`). The same
@@ -271,12 +301,14 @@ npm run embed-parity [-- 200]     # compare stored vectors with what EMBED_URL r
 ```
 
 `scan`, `recordings` and `pipeline` do the worker's job in a one-off process:
-stop the worker first (`scripts/fetcher stop worker`), or both will work on the
-same recordings.
+stop the worker first (`scripts/fetcher stop worker`, or on a Mac hub
+`sudo scripts/macos/fetcherctl stop worker`), or both will work on the same
+recordings.
 
 ## Troubleshooting
 
-- **Transcriber "down" on the dashboard.** Check `logs/transcriber.log`. A WSL
+- **Transcriber "down" on the dashboard** (one machine), or the compute PC
+  online but jobs fail. Check `logs/transcriber.log` on the GPU machine. A WSL
   restart stops everything: run `scripts/fetcher start` again.
 - **"worker not running" on the dashboard.** `scripts/fetcher start worker`;
   `logs/worker.log` says why it stopped. On a Mac hub: `scripts/macos/fetcherctl status`.
@@ -287,6 +319,15 @@ same recordings.
   Mac's firewall, or `web` isn't running there.
 - **"Search down" on a Mac hub.** `scripts/macos/fetcherctl status` and
   `logs/embed.log`; the first search after a start loads the model (~1 GB).
+- **The public URL answers Cloudflare error 1033 (HTTP 530).** The hostname's
+  DNS record points at a tunnel nothing is connected to (e.g. the old PC
+  tunnel). It must be a proxied CNAME to the serving tunnel's
+  `<id>.cfargotunnel.com`.
+- **Seeking in a video is slow through the public URL (Mac hub).** Measured on
+  2026-10-17: small range requests sometimes stall for 2–25 s inside the
+  Cloudflare tunnel (QUIC), while the same requests on the Mac take
+  milliseconds and bulk transfers are fast. Not solved yet; switching the
+  Mac's cloudflared to `--protocol http2` is the first thing to try.
 - **Videos take a minute to start.** Every response is sent `Cache-Control:
   private` so Cloudflare doesn't cache it: on a cache miss Cloudflare pulled the
   whole file (100-700 MB) through the tunnel before answering the small range

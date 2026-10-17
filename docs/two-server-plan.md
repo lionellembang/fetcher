@@ -3,7 +3,25 @@
 Handoff for the agent on the Mac. The repo is `github.com/lionellembang/fetcher`
 (`main` is current). Read `README.md` first for how the system works today.
 
-> **Since built:** §1–§4 are on the `two-server` branch, and the code has since
+> **Status (2026-10-17):** §1–§5 are built on the `two-server` branch, and §6
+> steps 1–5 are done: the Mac is the hub (embed, worker and web as
+> LaunchDaemons), `lectures.tukeel.online` is served by the Mac's own
+> dashboard-managed tunnel, and the PC runs only `transcriber` and `node`. The
+> first real lecture was cut on the PC (its first upload failed the hash check
+> and was redone). The §6 verification list is still open. Where the build differs from this plan:
+>
+> - The node API is on the LAN listener only, not also on the web app behind
+>   the tunnel (the two machines are wired together), so there is no fallback
+>   URL: the PC's `.env` has one `HUB_URL`, not `HUB_URLS`.
+> - Cut uploads are one streamed, resumable PUT, not 64 MiB chunks (those were
+>   only for Cloudflare's request limit); claims carry no `chunkBytes`.
+> - The Mac's tunnel is dashboard-managed, so §5's local ingress edit was a
+>   Public Hostname in Zero Trust instead, and the old `lectures` CNAME had to
+>   be pointed at the Mac's tunnel by hand (until then Cloudflare answered 1033).
+> - Known issue: seeking in videos through the tunnel is slow (see the README's
+>   troubleshooting).
+>
+> The code has since
 > been split by machine: `server/shared/` (both), `server/hub/` (Mac) and
 > `server/compute/` (PC), the Python too (`transcriber/` is now
 > `server/compute/transcriber/`, `server/shared/embedding/` and

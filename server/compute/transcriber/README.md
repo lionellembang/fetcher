@@ -49,8 +49,9 @@ The default model in `run.sh` is `large-v3`; set `WHISPER_MODEL=turbo` for speed
 Resumable: files that already have a non-empty `.srt` are skipped, and a failed file leaves no output, so it is redone on the next run.
 
 ```bash
-cd /path/to/videos && (nohup bash -c 'for f in *.mp4; do [ -s "$HOME/transcription/output/subtitles/${f%.mp4}.srt" ] || ~/transcription/transcribe.sh -l id "$f"; done' > ~/transcription/logs/transcribe-all.log 2>&1 &)
-tail -f ~/transcription/logs/transcribe-all.log
+T=/path/to/fetcher/server/compute/transcriber   # this folder
+mkdir -p "$T/logs" && cd /path/to/videos && (nohup bash -c 'for f in *.mp4; do [ -s "$T/output/subtitles/${f%.mp4}.srt" ] || "$T/transcribe.sh" -l id "$f"; done' > "$T/logs/transcribe-all.log" 2>&1 &)
+tail -f "$T/logs/transcribe-all.log"
 ```
 
 To redo a file, delete its `.srt` and rerun the loop. An empty folder makes the loop exit silently, so check the path if nothing happens.
@@ -159,16 +160,16 @@ Times are wall clock per file, including upload over localhost, decode and VAD.
 
 ## Known issues
 
-- **Does not survive a WSL restart.** The server and batch jobs stop silently. Check `/health` before assuming it is up; a systemd user service would fix this.
-- **Very quiet recordings transcribe badly.** A file averaging about −36 dB came out as gibberish. Normalising loudness first (ffmpeg `loudnorm`) is the likely fix.
+- **Does not survive a WSL restart.** The server and batch jobs stop silently; run `scripts/fetcher start` again. Check `/health` before assuming it is up.
+- **Very quiet recordings transcribe badly** when sent as they are: a file averaging about −36 dB came out as gibberish. The pipeline normalises loudness (ffmpeg `loudnorm`) before sending quiet recordings (`TRANSCRIBE_LOUDNORM=quiet`); `transcribe.sh` doesn't.
 - **Short stray words remain**, such as a lone "Halo" from a burst of chatter that passes the gate.
 - **Outputs are keyed by file name.** If an input is replaced under the same name, the old `.srt` is kept; delete it to redo the file.
-- **Whole videos are uploaded.** Sending 16 kHz mono audio instead would cut the transfer size a lot; the server accepts it unchanged.
+- **`transcribe.sh` uploads whole videos.** The pipeline sends 16 kHz mono FLAC instead, which the server accepts unchanged and is far smaller.
 - **No authentication.** Bind to `127.0.0.1` unless you need remote access. WSL2 only exposes ports to Windows localhost by default.
 
 ## To do
 
-- [ ] Run the server as a supervised service bound to `127.0.0.1`
+- [ ] Restart the server automatically after a crash or WSL restart (`scripts/fetcher` starts it detached, bound to `127.0.0.1`, but doesn't supervise it)
 - [ ] Write `.json` next to every `.srt`
 - [ ] Fail loudly when the batch input list is empty
 - [ ] Decide whether all courses are Indonesian or some need auto-detect

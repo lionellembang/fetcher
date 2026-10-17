@@ -1,11 +1,11 @@
 # downloadrecord — BINUS LMS lecture recordings
 
-> Part of **fetcher**: this is the server (scan, download, pipeline, dashboard,
-> MCP). Setup, running, and the cut/transcribe/search pipeline are described in
-> the [top-level README](../README.md); this file documents the LMS and
-> SharePoint side. Config now lives in the repo-root `.env`. Downloads now go
-> over plain HTTP with the browser's SharePoint cookies and resume after a
-> broken transfer; the browser download below is the fallback.
+> Part of **fetcher**: this is the server: the hub (scan, download, pipeline,
+> dashboard, MCP), the compute node, and the Python servers, laid out by machine
+> (see [Layout](#layout)). Setup, running, the two-machine setup and the
+> cut/transcribe/search pipeline are described in the
+> [top-level README](../README.md); this file documents the LMS and SharePoint
+> side. Config lives in the repo-root `.env` (see `../.env.example`).
 
 A small server that downloads the lecture recordings of your BINUS LMS classes
 (Zoom, onsite *and* online). New recordings are detected as soon as they appear
@@ -27,7 +27,7 @@ every SCAN_INTERVAL_MINUTES (and on startup)
        ├─ recordings : ask the recording endpoint for each past session that had
        │               a Zoom meeting; 404 = not ready yet, re-checked next scan
        ├─ recording downloads : one Playwright browser → SharePoint sign-in →
-       │                        browser download of each recording not on disk
+       │                        resumable HTTP download of each recording not on disk
        └─ store      : SQLite record of every item and its status
 
 browser ── /d/<ACCESS_TOKEN> ──▶ dashboard (classes, sessions, recordings, files)
@@ -66,9 +66,12 @@ yet in **one cold Playwright browser**:
    cookies carry over to the rest of the batch.
 3. The link lands on the video player (`stream.aspx?id=<file path>`). The file's
    name and size come from SharePoint's REST API with the same cookies.
-4. Playwright downloads `<site>/_layouts/15/download.aspx?SourceUrl=<file path>`
-   (falling back to the share link with `download=1`) into `<file>.part`,
-   checks the size and renames it into place.
+4. The file is downloaded over plain HTTP with the browser's SharePoint cookies
+   (`shared/httpfetch.js`) into `<file>.part`: a broken or stalled transfer
+   resumes where it stopped (HTTP Range). The size is checked, then it's
+   renamed into place. Only if SharePoint won't serve it that way does
+   Playwright download `<site>/_layouts/15/download.aspx?SourceUrl=<file path>`
+   (or the share link with `download=1`) instead, which can't resume.
 
 A recording that fails is marked `failed` (the reason shows on hover in the
 dashboard) and retried on the next scan. A failed sign-in stops the batch and
@@ -127,7 +130,7 @@ Requires **Node ≥ 24** (built-in `node:sqlite`), or just use Docker.
 ```bash
 npm install
 npx playwright install chromium   # for the login
-cp .env.example .env              # fill in BINUS_USERNAME, BINUS_PASSWORD and an ACCESS_TOKEN
+cp ../.env.example ../.env        # fill in BINUS_USERNAME, BINUS_PASSWORD and an ACCESS_TOKEN
 ```
 
 Generate an access token:
@@ -139,7 +142,7 @@ node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
 ## Run
 
 ```bash
-npm start        # server + scan on startup + scan every SCAN_INTERVAL_MINUTES
+npm start        # hub/index.js: worker + web in one process (normally they run separately)
 npm run scan     # one scan, no server
 npm run recordings  # only download recordings the last scan found
 npm run login    # force a fresh login (watch it with HEADFUL=true)
@@ -151,7 +154,7 @@ Then open the dashboard at `http://<host>:<PORT>/d/<ACCESS_TOKEN>`.
 
 | Route | What |
 |---|---|
-| `GET /d/<token>` | Dashboard: one table per class, one row per session, with the downloaded recording and its SharePoint link. Has a **Scan now** button. |
+| `GET /d/<token>` | Dashboard: one card per class with a tile per session, and a **Scan now** button. The full route list is at the top of `hub/server.js`. |
 | `GET /d/<token>/api/items` | JSON list of all recordings. Filter with `?status=…`, `&period=…`. |
 | `POST /d/<token>/scan` | Start a scan now. Returns `202`; returns the running scan if one is already going. |
 | `GET /d/<token>/recording/<sessionId>` | Redirects to a fresh recording link (`404` if there isn't one yet). |
@@ -193,6 +196,9 @@ downloads/
 | `LOGIN_ATTEMPT_TIMEOUT_SEC` | `300` | a login attempt longer than this is killed and retried |
 | `TZ` | `Asia/Jakarta` | timezone |
 
+Every other setting (pipeline, search, the two-machine link) is listed with
+comments in `../.env.example`.
+
 ## Docker
 
 ```bash
@@ -202,7 +208,10 @@ npm run compose:down   # stop
 
 The session and database live in the `downloadrecord-data` volume. Downloaded
 files are bind-mounted to `./downloads` on the host. Compose sets
-`shm_size: 1gb` and `init: true` so Chromium runs reliably.
+`shm_size: 1gb` and `init: true` so Chromium runs reliably. The image predates
+the pipeline: it runs the hub (`hub/index.js`) but has no ffmpeg, auto-editor
+or transcriber, so it scans, downloads and serves, and the cut and transcribe
+steps fail in it.
 
 The login runs headless with the password on every attempt, so the account must
 not require an MFA prompt that a headless browser can't answer.
