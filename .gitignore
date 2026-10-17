@@ -11,3 +11,4 @@ logs/
 
 # service pid files (scripts/fetcher)
 /run/
+.DS_Store
