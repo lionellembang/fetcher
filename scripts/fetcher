@@ -90,7 +90,7 @@ check() {
     worker) for t in node ffmpeg ffprobe auto-editor; do command -v "$t" >/dev/null || { echo "Missing $t on PATH (see README → Setup)."; return 1; }; done ;;
     node)
       for t in node ffmpeg ffprobe auto-editor; do command -v "$t" >/dev/null || { echo "Missing $t on PATH (see README → Setup)."; return 1; }; done
-      [ -n "${HUB_URLS:-}" ] || { echo "node: set HUB_URLS in .env (e.g. http://<mac-lan-ip>:3102,https://lectures.example.com)."; return 1; }
+      [ -n "${HUB_URLS:-}" ] || { echo "node: set HUB_URLS in .env (e.g. http://<mac-lan-ip>:3102)."; return 1; }
       [ "${#NODE_TOKEN}" -ge 32 ] || { echo "node: NODE_TOKEN must be the hub's (at least 32 characters)."; return 1; } ;;
     tunnel)
       [ -n "${CLOUDFLARE_TUNNEL:-}" ] || { echo "tunnel: CLOUDFLARE_TUNNEL is empty in .env; skipping."; return 2; }

@@ -1,7 +1,8 @@
 /**
  * The hub's API for its compute node (COMPUTE=remote). The node always calls
- * in (pull), so it needs no open ports. Mounted at /node on the web app (the
- * tunnel: fallback) and alone on NODE_HOST:NODE_PORT (the LAN).
+ * in (pull), so it needs no open ports. It has its own listener on
+ * NODE_HOST:NODE_PORT for the LAN; it is not on the web app, so the tunnel
+ * doesn't expose it.
  *
  *   POST /node/claim {nodeId, version, stages, info, held, waitSec≤25}
  *                                       → 200 {job} or 204; long-polls up to waitSec
@@ -18,8 +19,8 @@
  * Every call needs "Authorization: Bearer <NODE_TOKEN>" (anything else is a
  * 404) and, on /jobs, "X-Node-Id" of the node holding the lease (else 409).
  * No filesystem path ever comes from the request: they all come from the job
- * and its item. Request bodies stay under Cloudflare's 100 MB, and the long
- * poll well under its ~100 s.
+ * and its item. Uploads come in chunks so a broken transfer only redoes the
+ * part that was in flight.
  */
 const fs = require('fs');
 const path = require('path');

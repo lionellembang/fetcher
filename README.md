@@ -196,8 +196,8 @@ some covered in lectures and some not.
 an always-on hub does everything except cut and transcribe, which it queues as
 jobs for a compute PC. The PC runs `scripts/fetcher start` with
 `FETCHER_SERVICES="transcriber node"`; its node agent (`server/node.js`) claims a
-job over the hub's `/node` API (`NODE_TOKEN`, LAN listener on `NODE_PORT`, the
-tunnel as fallback), downloads the original once into `data/node-cache`, runs the
+job over the hub's `/node` API (`NODE_TOKEN`; LAN only, on `NODE_PORT`, never
+through the tunnel), downloads the original once into `data/node-cache`, runs the
 work with the hub's settings, uploads the result in resumable 64 MiB chunks and
 reports back. The PC only ever calls out, so it needs no open ports. While it's
 off, the dashboard shows "waiting for PC"; a job interrupted by a shutdown goes

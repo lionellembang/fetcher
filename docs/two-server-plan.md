@@ -24,7 +24,7 @@ The PC isn't on 24/7, but the Mac server is. The goal:
   - the database and all files, as the source of truth
 - **PC (compute node, sometimes on):** only **cut** and **transcribe**. It pulls jobs from the Mac, downloads the original from the Mac, runs the work, and uploads the results.
 - **When the PC is off:** new recordings wait as "waiting for PC". The Mac never cuts or transcribes.
-- **Network:** the PC reaches the Mac over the home LAN. When the LAN isn't reachable, it falls back to the public tunnel URL.
+- **Network:** the PC reaches the Mac over the LAN (the two are wired to each other). There is no fallback through the public tunnel: the node API is not exposed there at all.
 - **Mac services:** run under launchd, so they start at boot and restart on crash.
 - **Keep the single-box mode working:** `COMPUTE=local` (the default) behaves exactly like today.
 
@@ -69,9 +69,9 @@ The PC isn't on 24/7, but the Mac server is. The goal:
                  Mac (hub, launchd)                                   PC / WSL2 (compute node)
  ┌──────────────────────────────────────────────────┐        ┌──────────────────────────────────┐
  │ worker: scan, download, probe, index, job queue  │        │ node agent (server/node.js)      │
- │ web:    dashboard, /files, MCP, /node API        │◀──LAN──│  claim → fetch source → cut or   │
- │ embed:  transcriber/embed_server.py (e5, CPU)    │  or    │  transcribe → upload → complete  │
- │ (existing Mac cloudflared + fetcher hostname)    │ tunnel │ transcriber (Whisper, GPU)       │
+ │ web:    dashboard, /files, MCP, /node API (LAN)  │◀──LAN──│  claim → fetch source → cut or   │
+ │ embed:  transcriber/embed_server.py (e5, CPU)    │        │  transcribe → upload → complete  │
+ │ (existing Mac cloudflared + fetcher hostname)    │        │ transcriber (Whisper, GPU)       │
  │ data/ downloads/ (source of truth)               │        │ data/node-cache/ (originals)     │
  └──────────────────────────────────────────────────┘        └──────────────────────────────────┘
 ```
@@ -123,19 +123,17 @@ The PC always initiates (pull model), so the PC needs no inbound ports.
 
 ## 2. Hub: `/node` API (web process, new `src/nodeApi.js`)
 
-Mount the router in two places:
-- on the existing app at `/node`, used through the tunnel as the fallback
-- on a second listener at `NODE_HOST:NODE_PORT` that serves **only** `/node`, for the LAN
+Mount the router only on a second listener at `NODE_HOST:NODE_PORT` that serves **only** `/node`, for the LAN. It is not mounted on the web app, so the tunnel doesn't expose it.
 
 **Auth:** `Authorization: Bearer <NODE_TOKEN>`, checked with `crypto.timingSafeEqual`. Anything else returns 404. Never derive a filesystem path from client input: every path comes from the job row and `cut.cutPaths(item.file_path)`. Every response sends `Cache-Control: no-store`.
 
 | Endpoint | Behaviour |
 |---|---|
-| `POST /node/claim` `{nodeId, version, stages, info, waitSec≤25}` | Updates `node_last_seen`/`node_info`. Long-polls for up to 25 s (under Cloudflare's 100 s). In one transaction, takes the oldest `queued` job of an accepted stage, prioritising cut and transcribe of the same item when the node already holds that original, and sets it `leased`. Returns `{job: {id, stage, params, item: {id, label, rel, size, probeMeta}, leaseSec, chunkBytes: 64 MiB}}` or 204. |
+| `POST /node/claim` `{nodeId, version, stages, info, waitSec≤25}` | Updates `node_last_seen`/`node_info`. Long-polls for up to 25 s. In one transaction, takes the oldest `queued` job of an accepted stage, prioritising cut and transcribe of the same item when the node already holds that original, and sets it `leased`. Returns `{job: {id, stage, params, item: {id, label, rel, size, probeMeta}, leaseSec, chunkBytes: 64 MiB}}` or 204. |
 | `GET /node/jobs/:id/source` | `res.sendFile` of the original, with Range support. |
 | `POST /node/jobs/:id/heartbeat` `{progress}` | Extends the lease. Returns `{cancel}`. A 409 means the job is no longer this node's. |
 | `GET /node/jobs/:id/upload/:name` | `name` ∈ `video`, `timeline`. Returns `{size}` of the partial upload, so the node can resume. |
-| `PUT /node/jobs/:id/upload/:name?offset=N` | Body ≤ 64 MiB, so it fits through Cloudflare. Appends to `<cutted dir>/.partial_node_<jobId>_<name>`. If `offset` ≠ the current size, returns 409 `{size}`. |
+| `PUT /node/jobs/:id/upload/:name?offset=N` | Body ≤ 64 MiB, so a break only redoes one chunk. Appends to `<cutted dir>/.partial_node_<jobId>_<name>`. If `offset` ≠ the current size, returns 409 `{size}`. |
 | `POST /node/jobs/:id/complete` | **Cut:** `{files: {video: {size, sha256}, timeline: {size, sha256}}, meta}`. Verifies size and hash, fsyncs, renames over `cutPaths()`, validates the timeline with `timeline.loadTimeline`, stores `result = {outputPath, meta}` and sets the job `done`. **Transcribe:** `{result: {segments, language}, meta}` (body limit about 20 MB), stored as the job `result`. |
 | `POST /node/jobs/:id/fail` `{error, silent}` | Sets the job `skipped` (silent) or `failed`, and removes partials. |
 
@@ -153,7 +151,7 @@ Tests (`server/test/nodeApi.test.js`, same style as `download.test.js`):
 
 | Key | Purpose |
 |---|---|
-| `HUB_URLS` | comma-separated, tried in order, e.g. `http://192.168.1.20:3102,https://lectures.tukeel.online` |
+| `HUB_URLS` | the Mac's LAN address, e.g. `http://192.168.1.20:3102` (several, comma-separated, are tried in order) |
 | `NODE_TOKEN` | — |
 | `NODE_ID` | defaults to the hostname |
 | `NODE_STAGES=cut,transcribe` | — |
@@ -230,7 +228,7 @@ Tests: an agent test against a fake hub (claim → source → upload-resume → 
    - set the PC `.env` to:
      - `CLOUDFLARE_TUNNEL=` (empty)
      - `FETCHER_SERVICES="transcriber node"`
-     - `HUB_URLS=http://<mac-lan-ip>:3102,https://lectures.tukeel.online`
+     - `HUB_URLS=http://<mac-lan-ip>:3102`
      - the same `NODE_TOKEN`
    - `scripts/fetcher start`
 6. **Verify** (below). After about a week, the PC's `downloads/` and `data/downloads.db` can be deleted; keep `data/node-cache`.
@@ -246,8 +244,9 @@ Tests: an agent test against a fake hub (claim → source → upload-resume → 
   - The dashboard shows "waiting for PC" and "Compute PC: offline".
   - Start the node again and the job runs.
 - **Mid-job shutdown:** kill the node during a cut. After the lease expires (shorten `NODE_LEASE_SEC` for the test) the job is queued again, and a restarted node finishes it.
-- **Fallback path:** set `HUB_URLS` to only the public URL. A cut upload larger than 100 MB completes through Cloudflare in 64 MiB chunks, and a broken chunk resumes.
+- **Broken link:** unplug the cable during a cut upload and plug it back in within a minute or two. The upload resumes from where it stopped.
 - **Security:**
-  - a wrong `NODE_TOKEN` gets 404 on both listeners
+  - a wrong `NODE_TOKEN` gets 404 on the LAN listener
+  - `https://lectures.tukeel.online/node/claim` gets 404 even with the right token: the node API isn't on the public side
   - `http://<mac-lan-ip>:3102/d/<ACCESS_TOKEN>/` gets 404, because the LAN listener serves only `/node`
 - **Reboot the Mac:** embed, worker and web come back without anyone logging in (if LaunchDaemons were used), the existing tunnel serves `lectures.tukeel.online` again, and the PC node reconnects on its own.

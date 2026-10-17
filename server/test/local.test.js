@@ -14,7 +14,7 @@ process.env.NODE_TOKEN = 'n'.repeat(48); // set, but this is not a hub
 const config = require('../src/config');
 const pipeline = require('../src/pipeline');
 const remote = require('../src/remote');
-const { createApp } = require('../src/server');
+const nodeApi = require('../src/nodeApi');
 
 test('COMPUTE defaults to local: cut and transcribe run here, as before', () => {
   assert.equal(config.compute, 'local');
@@ -27,7 +27,8 @@ test('COMPUTE defaults to local: cut and transcribe run here, as before', () => 
 });
 
 test('the /node API does not exist in local mode, even with a NODE_TOKEN', async () => {
-  const server = createApp().listen(0, '127.0.0.1');
+  assert.equal(nodeApi.enabled(), false);
+  const server = nodeApi.createLanApp().listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const res = await fetch(`http://127.0.0.1:${server.address().port}/node/claim`, {
     method: 'POST',

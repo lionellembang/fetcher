@@ -9,8 +9,8 @@
  * A heartbeat every 30 s keeps the lease and reports progress; when the hub
  * says the job was cancelled or given away, the work is stopped and dropped.
  * The node calls the hub, never the other way round, so it needs no open
- * ports. HUB_URLS are tried in order (LAN first); within a job the node
- * sticks to the one that answered and switches when it stops answering.
+ * ports. HUB_URLS is the hub's LAN address (several are tried in order, and
+ * within a job the node sticks to the one that answered).
  *
  * Originals stay in NODE_CACHE_DIR (least recently used evicted past
  * NODE_CACHE_GB), so cut and transcribe of one lecture download it once.
@@ -217,7 +217,7 @@ function createAgent(options = {}) {
     if (health && !transcriberWasUp) log('… transcriber is back');
     transcriberWasUp = !!health;
 
-    hub.reset(); // the LAN when it works
+    hub.reset(); // the first HUB_URL when it works
     const res = await hub.request('POST', '/node/claim', {
       json: { nodeId: o.nodeId, version, stages, info: await info(health), held: cache.held(), waitSec: o.waitSec },
       timeoutMs: (o.waitSec + 20) * 1000,
@@ -263,7 +263,7 @@ function createAgent(options = {}) {
         expectedSize: size,
         headers: hub.auth,
         resume: true, // a .part left by a restart is continued
-        rotateOnError: true, // LAN dropped mid-way: continue through the tunnel
+        rotateOnError: true, // with several HUB_URLS: continue through the next one
         notServed: [401, 403, 404, 409],
         attempts: 10,
         retryBaseMs: o.retryMs,

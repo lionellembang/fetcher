@@ -12,7 +12,7 @@ const { createAgent } = require('./src/node/agent');
 
 config.ensureDirs();
 if (!config.hubUrls.length) {
-  console.error('✗ HUB_URLS is empty: set it in .env, e.g. HUB_URLS=http://<mac-lan-ip>:3102,https://lectures.example.com');
+  console.error('✗ HUB_URLS is empty: set it in .env, e.g. HUB_URLS=http://<mac-lan-ip>:3102');
   process.exit(1);
 }
 if (config.nodeToken.length < 32) {

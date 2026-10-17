@@ -19,10 +19,9 @@
  *   GET  /d/<token>/files/<path>                 → downloaded / cut recordings
  *   GET  /d/<token>/api/{items,sessions,status,search,transcript/<sessionId>}
  *   POST /d/<token>/mcp                          → MCP (Streamable HTTP, stateless)
- *   /node/…                                      → compute node API (nodeApi.js, NODE_TOKEN)
  *
- * With COMPUTE=remote a second listener on NODE_HOST:NODE_PORT (the LAN)
- * serves only /node.
+ * With COMPUTE=remote a second listener on NODE_HOST:NODE_PORT (the LAN, not
+ * the tunnel) serves the compute node's /node API (nodeApi.js) and nothing else.
  */
 const express = require('express');
 const config = require('./config');
@@ -257,9 +256,6 @@ function createApp() {
 
   app.use('/d/:token', d);
 
-  // compute node API (through the tunnel, the fallback when the LAN isn't reachable)
-  app.use('/node', nodeApi.router());
-
   app.get('/', (req, res) =>
     res.type('html').send('<!doctype html><meta charset="utf-8"><title>fetcher</title><p>fetcher is running.</p>')
   );
@@ -283,7 +279,7 @@ function startServer() {
   if (config.compute === 'remote') {
     if (nodeApi.enabled()) {
       nodeApi.createLanApp().listen(config.nodePort, config.nodeHost, () =>
-        console.log(`→ Compute node API on http://${config.nodeHost}:${config.nodePort}/node (LAN) and ${config.publicUrl}/node`)
+        console.log(`→ Compute node API on http://${config.nodeHost}:${config.nodePort}/node (LAN only)`)
       );
     } else {
       console.warn('⚠ COMPUTE=remote but NODE_TOKEN is unset or shorter than 32 characters: the compute node API is off.');

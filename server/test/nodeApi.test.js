@@ -48,7 +48,7 @@ function listen(app) {
   });
 }
 
-let hub; // the web app (/node through the "tunnel")
+let hub; // the web app (dashboard, MCP; what the tunnel exposes)
 let lan; // the LAN listener
 test.before(async () => {
   hub = await listen(createApp());
@@ -111,17 +111,18 @@ function brokenPut(jobId, name, buf, sendBytes) {
 
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
-test('a wrong token gets 404 on both listeners, and the LAN listener serves only /node', async () => {
-  for (const base of [hub.base, lan.base]) {
-    assert.equal((await api('POST', '/node/claim', { base, auth: { authorization: 'Bearer nope' }, json: { nodeId: 'pc' } })).status, 404);
-    assert.equal((await api('POST', '/node/claim', { base, auth: {}, json: { nodeId: 'pc' } })).status, 404);
-  }
-  const lanDash = await fetch(`${lan.base}/d/${process.env.ACCESS_TOKEN}/`);
-  assert.equal(lanDash.status, 404);
+test('a wrong token gets 404; the LAN listener serves only /node, and the web app (tunnel) not /node', async () => {
+  assert.equal((await api('POST', '/node/claim', { auth: { authorization: 'Bearer nope' }, json: { nodeId: 'pc' } })).status, 404);
+  assert.equal((await api('POST', '/node/claim', { auth: {}, json: { nodeId: 'pc' } })).status, 404);
+  assert.equal((await api('POST', '/node/claim', { json: { nodeId: 'pc', stages: [] } })).status, 204);
+
+  // the web app is what the tunnel exposes: no node API there, whatever the token
+  assert.equal((await api('POST', '/node/claim', { base: hub.base, json: { nodeId: 'pc', stages: [] } })).status, 404);
+  assert.equal((await api('GET', '/node/jobs/1/source', { base: hub.base })).status, 404);
+
+  assert.equal((await fetch(`${lan.base}/d/${process.env.ACCESS_TOKEN}/`)).status, 404);
   assert.equal((await fetch(`${lan.base}/d/${process.env.ACCESS_TOKEN}/files/x`)).status, 404);
   assert.equal((await fetch(`${lan.base}/healthz`)).status, 404);
-  // and the right token works through the main app too
-  assert.equal((await api('POST', '/node/claim', { base: hub.base, json: { nodeId: 'pc', stages: [] } })).status, 204);
 });
 
 test('claim leases the oldest queued job; an expired lease goes back to the queue', async () => {
