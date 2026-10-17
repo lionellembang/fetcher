@@ -213,6 +213,24 @@ test('silent → reported as skipped; other errors as failed', async (t) => {
   ]);
 });
 
+test("the transcriber's phase and progress reach the hub in heartbeats", async (t) => {
+  const hub = await fakeHub([transcribeJob(11)]);
+  t.after(hub.close);
+  const agent = agentFor(hub.base, path.join(dir, 'cache-progress'), {
+    heartbeatMs: 10,
+    transcribeFile: async (file, opts) => {
+      opts.onPoll({ status: 'running', phase: 'transcribing', progress: 0.423 });
+      await new Promise((resolve) => setTimeout(resolve, 80)); // a few heartbeats go out meanwhile
+      return { segments: [{ start: 1, end: 2, text: 'halo' }], language: 'id', meta: {} };
+    },
+  });
+  await agent.step();
+  assert.ok(
+    hub.seen.beats.some((b) => b.phase === 'transcribe: transcribing' && b.pct === 42.3),
+    JSON.stringify(hub.seen.beats.slice(-3))
+  );
+});
+
 test('only cut jobs are claimed while the transcriber is down', async (t) => {
   const hub = await fakeHub([]);
   t.after(hub.close);

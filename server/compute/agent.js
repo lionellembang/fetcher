@@ -249,7 +249,11 @@ function createAgent(options = {}) {
     const p = job.params || {};
     let r;
     for (;;) {
-      setPhase('transcribe');
+      // the transcriber's own phase and progress go into the heartbeat (dashboard: "transcribe: transcribing 42%")
+      let tx = null;
+      setPhase('transcribe', () =>
+        tx ? { phase: `transcribe: ${tx.phase || tx.status}`, pct: tx.progress != null ? Math.round(1000 * tx.progress) / 10 : undefined } : {}
+      );
       try {
         r = await o.transcribeFile(src, {
           key: `${job.item.id}|${job.paramsKey}|${p.loudnorm}`,
@@ -260,6 +264,7 @@ function createAgent(options = {}) {
           duration: p.duration,
           label: job.item.label,
           signal,
+          onPoll: (j) => (tx = j),
         });
         break;
       } catch (err) {

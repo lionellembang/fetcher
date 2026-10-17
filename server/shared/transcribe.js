@@ -17,10 +17,11 @@ const cleanSegments = (segments) =>
 
 /**
  * Transcribe the audio of `file`. `key` identifies the work to the transcriber
- * (see whisper.submitJob). Resolves { segments, language, meta }. Throws
- * whisper.UnavailableError if the transcriber is down.
+ * (see whisper.submitJob); onPoll(job) sees its phase and progress as it runs.
+ * Resolves { segments, language, meta }. Throws whisper.UnavailableError if the
+ * transcriber is down.
  */
-async function transcribeFile(file, { key, language, model, gateDb, loudnorm, duration, label = path.basename(file), signal }) {
+async function transcribeFile(file, { key, language, model, gateDb, loudnorm, duration, label = path.basename(file), signal, onPoll }) {
   const h = await whisper.health();
   if (!h) throw new whisper.UnavailableError(`transcriber not reachable at ${config.whisperUrl}`);
 
@@ -38,7 +39,8 @@ async function transcribeFile(file, { key, language, model, gateDb, loudnorm, du
     const result = await whisper.waitJob(job.id, {
       timeoutMs,
       signal,
-      onProgress: (j) => console.log(`  … transcribe ${label}: ${j.status}${j.ahead ? ` (${j.ahead} ahead)` : ''}`),
+      onPoll,
+      onProgress: (j) => console.log(`  … transcribe ${label}: ${j.phase || j.status}${j.ahead ? ` (${j.ahead} ahead)` : ''}`),
     });
 
     const segments = cleanSegments(result.segments);

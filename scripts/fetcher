@@ -23,6 +23,8 @@
 #
 # Each service gets its own temp folder on disk (data/tmp/SERVICE, emptied on
 # start): /tmp is RAM here, and auto-editor, ffmpeg and uploads write big files.
+# transcriber and node run under scripts/supervise, which starts them again if
+# they crash or are killed for using too much memory.
 # With systemd, each also runs in its own scope (fetcher-SERVICE.scope), which
 # gives per-service memory figures and lets stop clean up stray child processes.
 set -euo pipefail
@@ -106,6 +108,8 @@ start_one() {
   [ $rc -eq 2 ] && return 0
   [ $rc -ne 0 ] && return 1
   cmd="$(cmd_for "$s")" || return 1
+  # the GPU machine's services come back by themselves after a crash or an out-of-memory kill
+  case "$s" in transcriber|node) cmd="scripts/supervise $s $cmd" ;; esac
   # setsid: its own process group, detached from this terminal, so it survives
   # closing it; stop() signals the whole group (run.sh → uvicorn, node → ffmpeg, …).
   echo "=== $(date '+%F %T') start ===" >> "$LOGS/$s.log"

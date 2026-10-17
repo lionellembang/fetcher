@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Keep a service running: run COMMAND, and when it exits with an error (a crash,
+# or the kernel killing it for using too much memory) start it again after a
+# pause that doubles each time (10 s up to 5 min; back to 10 s after a run of
+# 10+ minutes). A clean exit, or a stop (scripts/fetcher signals the whole
+# process group), ends it.
+#
+# usage: scripts/supervise NAME COMMAND [ARGS...]
+set -u
+name="$1"; shift
+stopping=0
+trap 'stopping=1' TERM INT HUP
+delay=10
+while :; do
+  started=$(date +%s)
+  "$@"; rc=$?
+  if [ "$stopping" = 1 ] || [ "$rc" -eq 0 ]; then exit 0; fi
+  why="exit code $rc"
+  if [ "$rc" -gt 128 ]; then
+    why="killed by signal $((rc - 128))"
+    [ "$rc" -eq 137 ] && why="$why (SIGKILL: out of memory? see dmesg)"
+  fi
+  [ $(( $(date +%s) - started )) -ge 600 ] && delay=10
+  echo "=== $(date '+%F %T') $name stopped ($why); starting it again in ${delay}s ==="
+  sleep "$delay" & wait $!
+  [ "$stopping" = 1 ] && exit 0
+  delay=$(( delay * 2 > 300 ? 300 : delay * 2 ))
+done

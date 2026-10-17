@@ -69,8 +69,10 @@ async function submitJob(file, { key, language, model, gateDb }) {
  * Wait for a job; resolves Whisper's JSON result ({ text, language, segments[] }).
  * Throws UnavailableError if the transcriber goes away or lost the job (it
  * restarted), and a plain Error if the job failed or took longer than `timeoutMs`.
+ * onProgress(job) is called when its status or phase changes (decoding audio,
+ * transcribing, …), onPoll(job) on every poll (job.progress: 0–1 of the audio).
  */
-async function waitJob(id, { timeoutMs, onProgress, signal } = {}) {
+async function waitJob(id, { timeoutMs, onProgress, onPoll, signal } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last;
   for (;;) {
@@ -84,8 +86,10 @@ async function waitJob(id, { timeoutMs, onProgress, signal } = {}) {
     }
     if (job.status === 'done') return job.result;
     if (job.status === 'failed') throw new Error(`transcription failed: ${job.error}`);
-    if (onProgress && job.status !== last) onProgress(job);
-    last = job.status;
+    if (onPoll) onPoll(job);
+    const state = `${job.status}|${job.phase || ''}`;
+    if (onProgress && state !== last) onProgress(job);
+    last = state;
     if (Date.now() > deadline) throw new Error(`transcription still ${job.status} after ${Math.round(timeoutMs / 60000)} min`);
     await sleep(POLL_MS);
   }
