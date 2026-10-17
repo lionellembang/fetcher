@@ -68,10 +68,10 @@ cmd_for() {
   case "$1" in
     transcriber)
       local venv port
-      venv="$(realpath -m "${TRANSCRIBER_VENV:-./transcriber/.venv}")"
+      venv="$(realpath -m "${TRANSCRIBER_VENV:-./server/compute/transcriber/.venv}")"
       [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (set TRANSCRIBER_VENV)." >&2; return 1; }
       port="${WHISPER_URL##*:}"; port="${port%%/*}"
-      echo "env VENV=$venv HOST=127.0.0.1 PORT=$port transcriber/run.sh" ;;
+      echo "env VENV=$venv HOST=127.0.0.1 PORT=$port server/compute/transcriber/run.sh" ;;
     worker) echo "env -C server node $NODE_FLAGS hub/worker.js" ;;
     web)    echo "env -C server node $NODE_FLAGS hub/web.js" ;;
     node)   echo "env -C server node $NODE_FLAGS compute/main.js" ;;

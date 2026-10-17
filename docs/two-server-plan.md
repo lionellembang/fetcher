@@ -5,7 +5,10 @@ Handoff for the agent on the Mac. The repo is `github.com/lionellembang/fetcher`
 
 > **Since built:** §1–§4 are on the `two-server` branch, and the code has since
 > been split by machine: `server/shared/` (both), `server/hub/` (Mac) and
-> `server/compute/` (PC); see `server/README.md` → Layout. Paths below such as
+> `server/compute/` (PC), the Python too (`transcriber/` is now
+> `server/compute/transcriber/`, `server/shared/embedding/` and
+> `server/hub/embed-server/`; `cutting/` is `docs/cutting/`); see
+> `server/README.md` → Layout. Paths below such as
 > `src/pipeline.js` are from before that split (now `hub/pipeline.js`,
 > `shared/cut.js`, `compute/agent.js`, …).
 

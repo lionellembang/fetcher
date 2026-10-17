@@ -1,5 +1,5 @@
 /**
- * Silence-cut a recording with auto-editor (port of the cutting repo's
+ * Silence-cut a recording with auto-editor (port of docs/cutting's
  * gapless_batch.sh). For  <dir>/X recording.mp4  it writes:
  *
  *   <dir>/cutted/X recording cutted.mp4            the cut video

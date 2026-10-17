@@ -1,8 +1,5 @@
-# environments (recreate from requirements.txt / requirements-embed.txt)
+# environment (recreate from requirements.txt)
 .venv/
-.venv-embed/
-__pycache__/
-*.pyc
 
 # runtime data
 logs/

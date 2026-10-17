@@ -4,6 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 VENV="${VENV:-$PWD/.venv}"
+# embedding.py (search embeddings) is shared with the hub's embed-server
+export PYTHONPATH="$PWD/../../shared/embedding${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="$VENV/bin:$PATH"   # picks up the bundled ffmpeg
 # faster-whisper (CTranslate2) needs CUDA 12's cuBLAS (libcublas.so.12), which PyTorch's
 # CUDA 13 venv doesn't have. It lives in ./.cuda12 (see requirements.txt), outside the

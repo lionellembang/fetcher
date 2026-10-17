@@ -209,14 +209,16 @@ not require an MFA prompt that a headless browser can't answer.
 
 ## Layout
 
-The code is split by the machine it runs on. `test/boundary.test.js` keeps it
-that way: `shared/` imports neither side, and `hub/` and `compute/` never import
+The code is split by the machine it runs on, Python included (the Python
+servers find `shared/embedding/` through `PYTHONPATH`, set by their run
+scripts). `test/boundary.test.js` keeps the Node code that way: `shared/` imports neither side, and `hub/` and `compute/` never import
 each other (`compute/` uses no npm packages, so the PC needs none of the hub's).
 
 **`shared/`**: used by both machines.
 
 | File | Role |
 |---|---|
+| `embedding/` | Python: search embeddings (multilingual-e5), used by both machines' Python servers. |
 | `env.js` | Reads `.env`; settings both machines use (data folder, tools, `WHISPER_URL`) and the parsers the two configs build on. |
 | `media.js` | Runs ffmpeg / auto-editor; file duration; 16 kHz audio for Whisper. |
 | `cut.js` | Silence-cut with auto-editor, with the settings it's given; `cutPaths`. |
@@ -248,6 +250,7 @@ each other (`compute/` uses no npm packages, so the PC needs none of the hub's).
 | `transcripts.js` | Saving, timelines, search. |
 | `server.js` / `page.js` / `mcp.js` | Express routes, dashboard HTML, MCP. |
 | `control.js` / `events.js` | Web → worker commands; in-process events. |
+| `embed-server/` | Python: the embedding-only server for search (`run-embed.sh`, `requirements-embed.txt`). |
 
 **`compute/`**: the compute node (PC).
 
@@ -258,6 +261,7 @@ each other (`compute/` uses no npm packages, so the PC needs none of the hub's).
 | `agent.js` | Claim a job, fetch the original, cut or transcribe, upload, complete. |
 | `hubClient.js` | Requests to the hub's node API. |
 | `cache.js` | Originals kept between jobs (LRU). |
+| `transcriber/` | Python: the Whisper server (`run.sh`, `requirements.txt`; see its README). |
 
 ## Extending
 

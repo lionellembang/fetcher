@@ -35,7 +35,7 @@ from fastapi.responses import PlainTextResponse
 from silero_vad import get_speech_timestamps, load_silero_vad
 from whisper.utils import get_writer
 
-import embedding  # search embeddings (CPU), shared with embed_server.py
+import embedding  # search embeddings (CPU): server/shared/embedding, on PYTHONPATH via run.sh
 
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "turbo")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

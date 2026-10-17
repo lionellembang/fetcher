@@ -52,13 +52,13 @@ const config = {
   quietDb: num(process.env.QUIET_DB, -20),
   quietMeanDb: num(process.env.QUIET_MEAN_DB, -40),
 
-  // Cut (auto-editor), tuned in the cutting repo's run 2
+  // Cut (auto-editor), tuned in docs/cutting (run 2)
   cutEnabled: bool(process.env.CUT_ENABLED, true),
   cutEdit: process.env.CUT_EDIT || 'audio:-30dB',
   cutMargin: process.env.CUT_MARGIN || '0.3s,0.5s',
   cutExtraArgs: String(process.env.CUT_EXTRA_ARGS || '').split(/\s+/).filter(Boolean),
 
-  // Transcribe (transcriber/ Whisper server, at WHISPER_URL)
+  // Transcribe (the Whisper server, compute/transcriber, at WHISPER_URL)
   transcribeEnabled: bool(process.env.TRANSCRIBE_ENABLED, true),
   transcribeLang: process.env.TRANSCRIBE_LANG || 'id',
   transcribeModel: process.env.TRANSCRIBE_MODEL || process.env.WHISPER_MODEL || 'large-v3',
@@ -99,7 +99,7 @@ if (!['local', 'remote'].includes(config.compute)) {
 }
 
 // Search embeddings: the transcriber's /embed by default; on a hub, the separate
-// embedding server (transcriber/embed_server.py).
+// embedding server (hub/embed-server).
 config.embedUrl = (process.env.EMBED_URL || config.whisperUrl).replace(/\/+$/, '');
 
 config.ensureDirs = function ensureDirs() {

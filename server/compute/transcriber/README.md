@@ -1,7 +1,9 @@
 # Lecture transcription server
 
-> Part of **fetcher**: `scripts/start.sh` starts this server for the pipeline,
-> which sends 16 kHz FLAC of each recording and also uses `/embed` for search.
+> Part of **fetcher**, on the compute node (the PC): `scripts/fetcher start`
+> runs this server for the pipeline, which sends 16 kHz FLAC of each recording
+> and also uses `/embed` for search. `run.sh` puts `server/shared/embedding/`
+> (shared with the hub's `server/hub/embed-server/`) on `PYTHONPATH`.
 
 A local HTTP server that turns lecture recordings into subtitles with Whisper `large-v3` on an NVIDIA GPU, run with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). It skips silence and quiet background chatter before transcribing, which stops Whisper from inventing text on non-speech.
 
@@ -36,9 +38,8 @@ The default model in `run.sh` is `large-v3`; set `WHISPER_MODEL=turbo` for speed
 | `run.sh` | Starts the server; puts `.venv/bin` (and its ffmpeg) on PATH; reads `WHISPER_MODEL`, `HOST`, `PORT` |
 | `transcribe.sh` | Client: uploads each file and writes `<name>.srt` to `$OUT` (default `output/subtitles`) |
 | `requirements.txt` | Pinned Python dependencies |
-| `embedding.py` | Search embeddings (multilingual-e5, CPU): shared by `server.py` and `embed_server.py` |
-| `embed_server.py` | Embedding-only server (`/health`, `/embed`, no Whisper), for a hub whose transcriber is on another machine |
-| `run-embed.sh`, `requirements-embed.txt` | Start it (`VENV`, default `./.venv-embed`; `HOST`, `PORT`) and its dependencies |
+| `../../shared/embedding/embedding.py` | Search embeddings (multilingual-e5, CPU), shared with the hub's embedding-only server |
+| `../../hub/embed-server/` | That server (`/health`, `/embed`, no Whisper), its `run-embed.sh` and `requirements-embed.txt`, for a hub whose transcriber is on another machine |
 | `.venv/`, `logs/`, `output/` | Environment, logs and results; not tracked by git |
 
 ## Usage

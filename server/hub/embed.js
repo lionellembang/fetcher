@@ -1,6 +1,6 @@
 /**
  * Search embeddings from EMBED_URL: the transcriber's /embed, or on a hub
- * whose transcriber is elsewhere, transcriber/embed_server.py.
+ * whose transcriber is elsewhere, hub/embed-server.
  */
 const config = require('./config');
 const { call } = require('../shared/whisper');

@@ -1,5 +1,5 @@
 /**
- * HTTP client for the transcriber (transcriber/server.py): health and Whisper
+ * HTTP client for the transcriber (compute/transcriber/server.py): health and Whisper
  * transcription. (Search embeddings are the hub's: hub/embed.js, through call().)
  *
  * Transcription goes through the transcriber's job queue (POST /jobs, then

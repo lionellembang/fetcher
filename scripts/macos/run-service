@@ -2,7 +2,7 @@
 # Run one of the hub's services in the foreground: what launchd runs for each
 # (see install-launchd). Works with macOS's bash 3.2.
 #
-#   embed   search embeddings (transcriber/embed_server.py, CPU)   EMBED_URL's port
+#   embed   search embeddings (server/hub/embed-server, CPU)      EMBED_URL's port
 #   worker  LMS scan, downloads, probe, index, compute node jobs    127.0.0.1:WORKER_PORT
 #   web     dashboard, files, MCP + the compute node's LAN API     HOST:PORT, NODE_HOST:NODE_PORT
 #
@@ -34,10 +34,10 @@ case "$svc" in
   embed)
     url="${EMBED_URL:-${WHISPER_URL:-http://127.0.0.1:8000}}"
     port="${url##*:}"; port="${port%%/*}"
-    venv="${EMBED_VENV:-./transcriber/.venv-embed}"
+    venv="${EMBED_VENV:-./server/hub/embed-server/.venv-embed}"
     case "$venv" in /*) ;; *) venv="$ROOT/${venv#./}" ;; esac
-    [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (see transcriber/requirements-embed.txt)." >&2; exit 1; }
-    exec env VENV="$venv" HOST=127.0.0.1 PORT="$port" transcriber/run-embed.sh ;;
+    [ -x "$venv/bin/python" ] || { echo "No Python environment at $venv (see server/hub/embed-server/requirements-embed.txt)." >&2; exit 1; }
+    exec env VENV="$venv" HOST=127.0.0.1 PORT="$port" server/hub/embed-server/run-embed.sh ;;
   worker)
     cd server
     exec node $NODE_FLAGS hub/worker.js ;;

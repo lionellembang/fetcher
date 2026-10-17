@@ -1,7 +1,7 @@
 """Text embeddings for search (multilingual-e5 by default), on the CPU.
 
 Shared by the transcriber (server.py, next to Whisper) and the embedding-only
-server (embed_server.py, on a hub that doesn't transcribe). Needs only torch,
+server (hub/embed-server/embed_server.py, on a hub that doesn't transcribe). Needs only torch,
 numpy, pydantic/fastapi and, once the model loads, sentencepiece,
 huggingface_hub and transformers: nothing Whisper.
 

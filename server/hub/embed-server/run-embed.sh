@@ -5,4 +5,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 VENV="${VENV:-$PWD/.venv-embed}"
+# embedding.py is shared with the compute node's transcriber
+export PYTHONPATH="$PWD/../../shared/embedding${PYTHONPATH:+:$PYTHONPATH}"
 exec "$VENV/bin/python" -m uvicorn embed_server:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}"

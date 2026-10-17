@@ -7,7 +7,7 @@ lecture, the timestamp and a link that opens the video at that moment.
 
 ```
 scripts/fetcher start            (each service can be started/stopped/restarted on its own)
- ├─ transcriber  transcriber/        Whisper large-v3 (GPU) + text embeddings (CPU)        :8000
+ ├─ transcriber  server/compute/transcriber/  Whisper large-v3 (GPU) + text embeddings (CPU) :8000
  ├─ worker       server/hub/worker.js  the backend: LMS scan → download → pipeline         :3101 (local)
  │    scan (every 6 h) ─▶ download (Playwright, SharePoint)
  │                          └─▶ probe (loudness, duration)
@@ -23,9 +23,12 @@ web part reads the shared SQLite database directly and sends the few actions
 restarted at any moment without interrupting work. With the worker stopped, the
 dashboard, search and MCP keep working; actions just say the worker isn't running.
 
-The three original repos live here as git subtrees with their history:
-`server/` (downloadrecord), `transcriber/` (transcription), `cutting/` (the
-silence-cut notes and tools; the cut logic itself now lives in `server/shared/cut.js`).
+The three original repos were merged in with their history: `server/`
+(downloadrecord), the transcription server (now `server/compute/transcriber/`,
+with its search embeddings split into `server/shared/embedding/` and
+`server/hub/embed-server/`), and the silence-cut notes and tuning tools (now
+`docs/cutting/`; the cut logic itself lives in `server/shared/cut.js`). The code
+is laid out by the machine that runs it; see [server/README.md](server/README.md) → Layout.
 
 ## Setup (once)
 
@@ -46,7 +49,7 @@ This runs on the WSL2 machine with the NVIDIA GPU.
 cd server && npm install && sudo npx playwright install-deps chromium && npx playwright install chromium
 ```
 
-**Transcriber.** Any Python 3.12 environment with `transcriber/requirements.txt`
+**Transcriber.** Any Python 3.12 environment with `server/compute/transcriber/requirements.txt`
 works. The existing `~/transcription/.venv` is used (`TRANSCRIBER_VENV` in `.env`);
 `sentence-transformers` was added to it, and its broken `torchaudio` (CUDA 12 build
 next to a CUDA 13 torch) was removed because `transformers` crashes importing it.
@@ -139,7 +142,7 @@ Mac doesn't run a tunnel yet), then:
 
 ```bash
 cd server && npm ci && npx playwright install chromium && cd ..
-cd transcriber && uv venv --python 3.12 .venv-embed && uv pip install --python .venv-embed/bin/python -r requirements-embed.txt && cd ..
+cd server/hub/embed-server && uv venv --python 3.12 .venv-embed && uv pip install --python .venv-embed/bin/python -r requirements-embed.txt && cd -
 ```
 
 In the Mac's `.env` (copied from the PC): `COMPUTE=remote`, a new
@@ -210,7 +213,7 @@ four steps, each with its own queue. Cut and transcribe can run at the same time
 | Step | What | Output |
 |---|---|---|
 | probe | ffmpeg `volumedetect` + duration. Peak below −60 dB or average below −55 dB = no audio: cut and transcribe are skipped. Peak below −20 dB or average below −40 dB = "quiet" | stage meta |
-| cut | auto-editor `--edit audio:-30dB --margin 0.3s,0.5s` (the tuned settings from `cutting/`), plus `--export v1` for the kept-spans timeline. Under 10 s kept = skipped | `…/cutted/<name> cutted.mp4` + `.timeline.json` |
+| cut | auto-editor `--edit audio:-30dB --margin 0.3s,0.5s` (the tuned settings from `docs/cutting/`), plus `--export v1` for the kept-spans timeline. Under 10 s kept = skipped | `…/cutted/<name> cutted.mp4` + `.timeline.json` |
 | transcribe | 16 kHz mono FLAC of the **original** (loudness-normalised if quiet) → a job on the transcriber (Whisper with VAD + loudness gate), polled until done | segments in SQLite (+ FTS5) |
 | index | ~45 s overlapping windows of segments → `multilingual-e5-base` embeddings | chunks in SQLite |
 
@@ -241,7 +244,7 @@ work with the hub's settings, uploads the result (resuming after a break) and
 reports back. The PC only ever calls out, so it needs no open ports. While it's
 off, the dashboard shows "waiting for PC"; a job interrupted by a shutdown goes
 back in the queue when its lease (`NODE_LEASE_SEC`) runs out. Search on the hub
-uses `transcriber/embed_server.py` (CPU, no Whisper) via `EMBED_URL`.
+uses `server/hub/embed-server/` (CPU, no Whisper) via `EMBED_URL`.
 
 **Files:**
 

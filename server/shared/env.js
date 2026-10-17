@@ -51,7 +51,7 @@ const config = {
   autoEditorBin: process.env.AUTO_EDITOR_BIN || 'auto-editor',
   cutTimeoutMin: int(process.env.CUT_TIMEOUT_MIN, 180),
 
-  // The Whisper transcriber on this machine (transcriber/server.py)
+  // The Whisper transcriber on this machine (compute/transcriber/server.py)
   whisperUrl: (process.env.WHISPER_URL || 'http://127.0.0.1:8000').replace(/\/+$/, ''),
 };
 
