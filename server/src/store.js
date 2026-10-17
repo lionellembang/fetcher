@@ -107,13 +107,34 @@ function getDb() {
       embed_model TEXT NOT NULL,
       PRIMARY KEY (item_id, idx)
     );
+
+    -- Cut / transcribe work for a compute node (COMPUTE=remote). key is
+    -- item|stage|params_key, so a restarted worker attaches to its old job.
+    CREATE TABLE IF NOT EXISTS node_jobs (
+      id          INTEGER PRIMARY KEY,
+      item_id     TEXT NOT NULL,
+      stage       TEXT NOT NULL,
+      params_key  TEXT NOT NULL,
+      key         TEXT NOT NULL UNIQUE,
+      params      TEXT,                      -- JSON: the settings the node must use
+      status      TEXT NOT NULL,             -- queued | leased | done | failed | skipped | cancelled
+      node_id     TEXT,
+      lease_until INTEGER,                   -- ms since the epoch
+      progress    TEXT,                      -- JSON, from the node's heartbeats
+      result      TEXT,                      -- JSON
+      error       TEXT,
+      consumed_at TEXT,                      -- when the worker took the outcome into its stage
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS node_jobs_status ON node_jobs (status, id);
   `);
   return db;
 }
 
-function transaction(fn) {
+function transaction(fn, { immediate = false } = {}) {
   const d = getDb();
-  d.exec('BEGIN');
+  d.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN');
   try {
     const out = fn(d);
     d.exec('COMMIT');
@@ -333,7 +354,155 @@ function allChunks() {
     });
 }
 
+// ---- node jobs (COMPUTE=remote) ----
+
+const parseJob = (row) =>
+  row && {
+    ...row,
+    params: row.params ? JSON.parse(row.params) : {},
+    progress: row.progress ? JSON.parse(row.progress) : null,
+    result: row.result ? JSON.parse(row.result) : null,
+  };
+
+const JOB_JSON = new Set(['params', 'progress', 'result']);
+
+function getNodeJob(id) {
+  return parseJob(getDb().prepare('SELECT * FROM node_jobs WHERE id = ?').get(id));
+}
+
+/** Jobs, newest first; `status` may be one status or a list. */
+function listNodeJobs({ status, itemId, stage } = {}) {
+  const where = [];
+  const args = [];
+  if (status) {
+    const list = [].concat(status);
+    where.push(`status IN (${list.map(() => '?').join(', ')})`);
+    args.push(...list);
+  }
+  if (itemId) where.push('item_id = ?'), args.push(itemId);
+  if (stage) where.push('stage = ?'), args.push(stage);
+  return getDb()
+    .prepare(`SELECT * FROM node_jobs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC`)
+    .all(...args)
+    .map(parseJob);
+}
+
+/** Update the given fields of a job (updated_at follows). */
+function setNodeJob(id, fields, d = getDb()) {
+  const f = { ...fields, updated_at: now() };
+  for (const k of Object.keys(f)) if (JOB_JSON.has(k)) f[k] = f[k] == null ? null : JSON.stringify(f[k]);
+  if (f.error != null) f.error = String(f.error).slice(0, 2000);
+  const cols = Object.keys(f);
+  d.prepare(`UPDATE node_jobs SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((c) => f[c] ?? null), id);
+}
+
+/**
+ * The job for `key`: an existing queued, leased, or done-but-not-yet-taken
+ * one is returned as it is (a restarted worker re-attaches to it); anything
+ * else is (re)queued. Other open jobs for the same item and stage (older
+ * settings) are cancelled. Returns { job, attached }.
+ */
+function upsertNodeJob({ itemId, stage, paramsKey, key, params }) {
+  return transaction(
+    (d) => {
+      const t = now();
+      d.prepare(
+        `UPDATE node_jobs SET status = 'cancelled', updated_at = ? WHERE item_id = ? AND stage = ? AND key != ? AND status IN ('queued', 'leased')`
+      ).run(t, itemId, stage, key);
+      const cur = parseJob(d.prepare('SELECT * FROM node_jobs WHERE key = ?').get(key));
+      if (cur && (cur.status === 'queued' || cur.status === 'leased' || (cur.status === 'done' && !cur.consumed_at))) {
+        return { job: cur, attached: true };
+      }
+      if (cur) {
+        d.prepare(
+          `UPDATE node_jobs SET status = 'queued', params = ?, node_id = NULL, lease_until = NULL, progress = NULL, result = NULL,
+             error = NULL, consumed_at = NULL, created_at = ?, updated_at = ? WHERE id = ?`
+        ).run(JSON.stringify(params || {}), t, t, cur.id);
+      } else {
+        d.prepare(
+          `INSERT INTO node_jobs (item_id, stage, params_key, key, params, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`
+        ).run(itemId, stage, paramsKey, key, JSON.stringify(params || {}), t, t);
+      }
+      return { job: parseJob(d.prepare('SELECT * FROM node_jobs WHERE key = ?').get(key)), attached: false };
+    },
+    { immediate: true }
+  );
+}
+
+/**
+ * Lease the oldest queued job of one of `stages` to `nodeId`, preferring items
+ * in `held` (originals the node already has). Any lease this node still holds
+ * is given up first: a node only claims when it has nothing running. Returns
+ * the leased job, or null.
+ */
+function claimNodeJob({ nodeId, stages, held = [], leaseMs }) {
+  return transaction(
+    (d) => {
+      const t = now();
+      d.prepare(
+        `UPDATE node_jobs SET status = 'queued', node_id = NULL, lease_until = NULL, progress = NULL, updated_at = ?
+         WHERE status = 'leased' AND node_id = ?`
+      ).run(t, nodeId);
+      if (!stages.length) return null;
+      const heldList = held.length ? held : [''];
+      const row = d
+        .prepare(
+          `SELECT id FROM node_jobs WHERE status = 'queued' AND stage IN (${stages.map(() => '?').join(', ')})
+           ORDER BY (item_id IN (${heldList.map(() => '?').join(', ')})) DESC, id LIMIT 1`
+        )
+        .get(...stages, ...heldList);
+      if (!row) return null;
+      d.prepare(`UPDATE node_jobs SET status = 'leased', node_id = ?, lease_until = ?, progress = NULL, updated_at = ? WHERE id = ?`).run(
+        nodeId,
+        Date.now() + leaseMs,
+        t,
+        row.id
+      );
+      return parseJob(d.prepare('SELECT * FROM node_jobs WHERE id = ?').get(row.id));
+    },
+    { immediate: true }
+  );
+}
+
+/** Put leased jobs whose lease ran out back in the queue; returns them (as they were). */
+function expireNodeLeases(nowMs = Date.now()) {
+  const rows = getDb()
+    .prepare(
+      `UPDATE node_jobs SET status = 'queued', node_id = NULL, lease_until = NULL, progress = NULL, updated_at = ?
+       WHERE status = 'leased' AND lease_until < ? RETURNING id, item_id, stage`
+    )
+    .all(now(), nowMs);
+  return rows; // node_id is gone after the update; callers only log
+}
+
+/**
+ * Update a job only while `nodeId` holds its lease (so a job that expired,
+ * was cancelled or went to another node is left alone). Returns whether it did.
+ */
+function updateLeasedJob(id, nodeId, fields) {
+  const f = { ...fields, updated_at: now() };
+  for (const k of Object.keys(f)) if (JOB_JSON.has(k)) f[k] = f[k] == null ? null : JSON.stringify(f[k]);
+  if (f.error != null) f.error = String(f.error).slice(0, 2000);
+  const cols = Object.keys(f);
+  return (
+    getDb()
+      .prepare(`UPDATE node_jobs SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ? AND status = 'leased' AND node_id = ?`)
+      .run(...cols.map((c) => f[c] ?? null), id, nodeId).changes > 0
+  );
+}
+
+/** Cancel a job if it's still open (queued or leased). Returns whether it was. */
+function cancelNodeJob(id, why) {
+  return (
+    getDb()
+      .prepare(`UPDATE node_jobs SET status = 'cancelled', error = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'leased')`)
+      .run(why == null ? null : String(why).slice(0, 2000), now(), id).changes > 0
+  );
+}
+
 module.exports = {
+  getNodeJob, listNodeJobs, setNodeJob, upsertNodeJob, claimNodeJob, expireNodeLeases, cancelNodeJob, updateLeasedJob, transaction,
   upsertItem, markDownloaded, markFailed, getItem, listItems, counts, setMeta, getMeta,
   getStage, getStages, stagesByItem, setStage, resetRunningStages,
   saveTranscript, getTranscript, getSegments, searchSegments,

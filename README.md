@@ -192,6 +192,18 @@ indexed, it stands out from that query's average by a z-score. The thresholds
 (`SEARCH_*` in `.env`) are first guesses: tune them with real study questions,
 some covered in lectures and some not.
 
+**Two machines** (`COMPUTE=remote`, plan in [docs/two-server-plan.md](docs/two-server-plan.md)):
+an always-on hub does everything except cut and transcribe, which it queues as
+jobs for a compute PC. The PC runs `scripts/fetcher start` with
+`FETCHER_SERVICES="transcriber node"`; its node agent (`server/node.js`) claims a
+job over the hub's `/node` API (`NODE_TOKEN`, LAN listener on `NODE_PORT`, the
+tunnel as fallback), downloads the original once into `data/node-cache`, runs the
+work with the hub's settings, uploads the result in resumable 64 MiB chunks and
+reports back. The PC only ever calls out, so it needs no open ports. While it's
+off, the dashboard shows "waiting for PC"; a job interrupted by a shutdown goes
+back in the queue when its lease (`NODE_LEASE_SEC`) runs out. Search on the hub
+uses `transcriber/embed_server.py` (CPU, no Whisper) via `EMBED_URL`.
+
 **Files:**
 
 ```
@@ -206,11 +218,13 @@ data/session.json      LMS token (24 h)
 ## Commands (in `server/`)
 
 ```bash
-npm test                          # unit tests (timeline mapping, chunking)
+npm test                          # unit tests (timeline mapping, chunking, downloads, node API + agent)
 npm run scan                      # one LMS scan, no server
 npm run recordings [-- <sessionId>]   # only download
 npm run pipeline [-- <sessionId>]     # process downloaded recordings (all, or some) and exit
 npm run login                     # force a fresh login (HEADFUL=true to watch)
+npm run node                      # compute node agent in the foreground (HUB_URLS, NODE_TOKEN)
+npm run embed-parity [-- 200]     # compare stored vectors with what EMBED_URL returns now
 ```
 
 `scan`, `recordings` and `pipeline` do the worker's job in a one-off process:

@@ -6,6 +6,7 @@
  * (DATA_DIR, DOWNLOAD_DIR) resolve against the repo root.
  */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
@@ -116,7 +117,35 @@ const config = {
   searchMinChunksForZ: int(process.env.SEARCH_MIN_CHUNKS_FOR_Z, 200),
 
   timezone: process.env.TZ || 'Asia/Jakarta',
+
+  // Where cut + transcribe run: 'local' (this machine, as always) or 'remote'
+  // (queued for a compute node that pulls them over the /node API).
+  compute: (process.env.COMPUTE || 'local').trim().toLowerCase(),
+  // Shared secret between the hub and its compute node (separate from ACCESS_TOKEN).
+  nodeToken: process.env.NODE_TOKEN || '',
+  // Hub: a second listener for the compute node on the LAN, serving only /node.
+  nodeHost: process.env.NODE_HOST || '0.0.0.0',
+  nodePort: int(process.env.NODE_PORT, 3102),
+  // A leased job goes back to the queue when its node hasn't sent a heartbeat for this long.
+  nodeLeaseSec: int(process.env.NODE_LEASE_SEC, 600),
+
+  // Compute node: hubs to try in order (LAN first, then the public URL).
+  hubUrls: list(process.env.HUB_URLS).map((u) => u.replace(/\/+$/, '')),
+  nodeId: process.env.NODE_ID || os.hostname(),
+  nodeStages: list(process.env.NODE_STAGES || 'cut,transcribe'),
+  nodeCacheDir: path.resolve(REPO, process.env.NODE_CACHE_DIR || './data/node-cache'),
+  // Originals kept on the node (least recently used go first), so cut and
+  // transcribe of the same lecture download it once.
+  nodeCacheGb: num(process.env.NODE_CACHE_GB, 20),
 };
+
+if (!['local', 'remote'].includes(config.compute)) {
+  throw new Error(`COMPUTE must be "local" or "remote", not "${process.env.COMPUTE}"`);
+}
+
+// Search embeddings: the transcriber's /embed by default; on a hub, the separate
+// embedding server (transcriber/embed_server.py).
+config.embedUrl = (process.env.EMBED_URL || config.whisperUrl).replace(/\/+$/, '');
 
 config.tmpDir = path.join(dataDir, 'tmp');
 

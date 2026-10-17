@@ -1,0 +1,13 @@
+# The embedding-only server (embed_server.py) for a hub that doesn't transcribe.
+# Python 3.12. Install with:
+#   uv venv --python 3.12 .venv-embed && uv pip install --python .venv-embed/bin/python -r requirements-embed.txt
+# torch from PyPI runs on the CPU on macOS. Same pins as requirements.txt, so the
+# vectors match what the transcriber stored (check with `npm run embed-parity`).
+torch==2.14.1
+numpy==2.5.3
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+sentencepiece==0.2.2
+# Brings transformers and huggingface_hub at the versions the transcriber runs;
+# only imported itself for a non-e5 EMBED_MODEL.
+sentence-transformers==6.1.0

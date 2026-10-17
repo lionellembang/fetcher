@@ -1,5 +1,6 @@
-# environment (recreate from requirements.txt)
+# environments (recreate from requirements.txt / requirements-embed.txt)
 .venv/
+.venv-embed/
 __pycache__/
 *.pyc
 

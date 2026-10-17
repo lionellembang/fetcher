@@ -13,6 +13,8 @@ const store = require('./store');
 const control = require('./control');
 const whisper = require('./whisper');
 const transcripts = require('./transcripts');
+const config = require('./config');
+const remote = require('./remote');
 const { cutToOrig } = require('./timeline');
 
 const MAX_TEXT = 60000; // characters per get_transcript reply
@@ -219,7 +221,8 @@ function buildServer() {
     'pipeline_status',
     {
       title: 'Pipeline status',
-      description: 'Last LMS scan, what the download/cut/transcribe pipeline is doing, whether the transcriber is up, and recent failures.',
+      description:
+        'Last LMS scan, what the download/cut/transcribe pipeline is doing, whether the transcriber (or, when cut and transcribe run on a separate compute PC, that PC) is up, and recent failures.',
       inputSchema: {},
       annotations: ro,
     },
@@ -232,12 +235,18 @@ function buildServer() {
           if (s.status === 'failed') failures.push({ session_id: it.session_id, course: it.course_code, session: it.session_number, stage: name, error: (s.error || '').split('\n')[0] });
         }
       }
-      const [w, transcriber] = await Promise.all([control.status(), whisper.health()]);
+      const isRemote = config.compute === 'remote';
+      const [w, transcriber] = await Promise.all([control.status(), isRemote ? whisper.embedHealth() : whisper.health()]);
       return text({
         last_scan: store.getMeta('last_scan'),
         worker: w ? 'up' : 'down (nothing is being scanned, downloaded or processed)',
         scanning: w ? w.scanning : null,
-        transcriber,
+        ...(isRemote
+          ? {
+              compute_pc: remote.status(), // cut + transcribe run there; offline = new recordings wait for it
+              search_server: transcriber,
+            }
+          : { transcriber }),
         pipeline: w ? w.pipeline : null,
         coverage: transcripts.coverage(),
         failures: failures.slice(0, 30),

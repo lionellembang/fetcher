@@ -84,6 +84,21 @@ function ago(iso) {
 
 const VERB = { probe: 'checking audio', cut: 'cutting', transcribe: 'transcribing', index: 'indexing' };
 
+/** "upload 42%" from a compute node's heartbeat progress. */
+const fmtProgress = (p) => (p ? [p.phase, p.pct != null ? `${Math.round(p.pct)}%` : ''].filter(Boolean).join(' ') : '');
+
+/**
+ * Tile state for a stage waiting on the compute node (row.remote, see
+ * remote.annotateStages), or null.
+ */
+function remoteTile(stage, s, href) {
+  const r = s && s.remote;
+  if (!r) return null;
+  if (r.state === 'leased') return { kind: 'busy', label: `${VERB[stage]} on PC…`, detail: fmtProgress(r.progress), href };
+  if (r.state === 'waiting') return { kind: 'queued', label: 'waiting for PC', detail: 'Cutting and transcribing run on the compute PC, which is offline.', href };
+  return { kind: 'queued', label: 'queued for PC', detail: 'Queued for the compute PC.', href };
+}
+
 /**
  * What a session tile shows: { kind, label, detail, href }.
  * kind: ready | busy | queued | silent | soon | failed | fetching
@@ -103,13 +118,17 @@ function tileState(base, it, st = {}) {
     if (s && s.status === 'failed') return { kind: 'failed', label: `${stage} failed`, detail: (s.error || '').split('\n')[0], href };
   }
   for (const stage of ['probe', 'cut', 'transcribe', 'index']) {
-    if (st[stage] && st[stage].status === 'running') return { kind: 'busy', label: `${VERB[stage]}…`, detail: '', href };
+    if (st[stage] && st[stage].status === 'running') return remoteTile(stage, st[stage], href) || { kind: 'busy', label: `${VERB[stage]}…`, detail: '', href };
   }
   if (st.transcribe && st.transcribe.status === 'done' && (!st.index || st.index.status === 'done')) {
     const bits = [`${st.transcribe.meta.segments ?? '?'} transcript lines`];
     if (st.cut && st.cut.status === 'done' && st.cut.meta.keptPct != null) bits.push(`cut keeps ${st.cut.meta.keptPct}%`);
     if (probe && audioClass(probe).quiet) bits.push('quiet recording');
     return { kind: 'ready', label: 'ready', detail: bits.join(' · '), href };
+  }
+  for (const stage of ['transcribe', 'cut']) {
+    const t = remoteTile(stage, st[stage], href);
+    if (t) return t;
   }
   const waiting = ['probe', 'cut', 'transcribe', 'index'].map((k) => st[k]).find((s) => s && s.status === 'pending' && s.error);
   return { kind: 'queued', label: waiting ? 'waiting' : 'queued', detail: waiting ? waiting.error : 'Queued for processing.', href };
@@ -216,7 +235,25 @@ function courseCard(base, course, stages, span) {
   </section>`;
 }
 
-function renderDashboard({ base, items, stages, lastScan, scanning, pipe, whisperUp }) {
+/** System tile rows for COMPUTE=remote: the compute PC and the search (embedding) server. */
+function remoteRows(node, stages, searchUp) {
+  let waiting = 0;
+  for (const st of Object.values(stages)) for (const k of ['cut', 'transcribe']) if (st[k] && st[k].remote && st[k].remote.state !== 'leased') waiting++;
+  const seen = node.lastSeen ? `last seen ${ago(node.lastSeen)}` : 'never connected';
+  const gpu = node.info && node.info.gpu ? ` · ${esc(node.info.gpu)}` : '';
+  return `<dt>Compute PC</dt><dd><span class="dot ${node.online ? 'on' : 'off'}"></span>${node.online ? 'online' : 'offline'}<span class="muted"> · ${esc(seen)}${gpu}</span>${waiting ? ` <span class="muted">(${waiting} waiting)</span>` : ''}</dd>
+        <dt>Search</dt><dd><span class="dot ${searchUp ? 'on' : 'off'}"></span>${searchUp ? 'up' : 'down'}</dd>`;
+}
+
+/** What a busy lane is doing, e.g. "cutting COMP6 LEC S3 on PC (upload 40%)". */
+function laneText(stage, l) {
+  const r = l.running.remote;
+  if (!r) return `${esc(VERB[stage])} ${esc(l.running.label)}`;
+  if (r.status === 'leased') return `${esc(VERB[stage])} ${esc(l.running.label)} on PC${r.progress ? ` <span class="muted">(${esc(fmtProgress(r.progress))})</span>` : ''}`;
+  return `${esc(l.running.label)}: ${esc(stage)} <span class="muted">waiting for PC</span>`;
+}
+
+function renderDashboard({ base, items, stages, lastScan, scanning, pipe, whisperUp, node, searchUp }) {
   // course → component → sessions
   const courses = new Map();
   for (const it of items) {
@@ -247,7 +284,7 @@ function renderDashboard({ base, items, stages, lastScan, scanning, pipe, whispe
   const working = !pipe
     ? '<span class="err">worker not running</span>'
     : busy.length
-      ? busy.map(([stage, l]) => `${esc(VERB[stage])} ${esc(l.running.label)}`).join('<br>')
+      ? busy.map(([stage, l]) => laneText(stage, l)).join('<br>')
       : 'idle';
 
   const cards = packCourses([...courses.values()].sort((a, b) => a.code.localeCompare(b.code)))
@@ -290,7 +327,7 @@ function renderDashboard({ base, items, stages, lastScan, scanning, pipe, whispe
       <p class="eyebrow">System</p>
       <dl>
         <dt>Worker</dt><dd><span class="dot ${pipe ? 'on' : 'off'}"></span>${working}${queued ? ` <span class="muted">(+${queued} queued)</span>` : ''}</dd>
-        <dt>Transcriber</dt><dd><span class="dot ${whisperUp ? 'on' : 'off'}"></span>${whisperUp ? 'up' : 'down'}</dd>
+        ${node ? remoteRows(node, stages, searchUp) : `<dt>Transcriber</dt><dd><span class="dot ${whisperUp ? 'on' : 'off'}"></span>${whisperUp ? 'up' : 'down'}</dd>`}
         <dt>Last scan</dt><dd title="${esc(lastScan || '')}">${esc(ago(lastScan))}${scanning ? ' · <strong>scanning…</strong>' : ''}</dd>
       </dl>
       <form method="post" action="${base}/scan"><button type="submit"${pipe ? '' : ' disabled title="The worker is not running"'}>Scan now</button></form>

@@ -12,6 +12,10 @@
  * Failures stay failed until the next scan, a restart or a manual retry. If the
  * transcriber is down, transcribe/index go back to pending and are retried
  * every minute.
+ *
+ * With COMPUTE=remote, cut and transcribe are queued for the compute node
+ * instead (remote.js); they then cost this machine nothing, so they don't count
+ * toward HEAVY_CONCURRENCY.
  */
 const fs = require('fs');
 const path = require('path');
@@ -22,6 +26,7 @@ const media = require('./media');
 const cut = require('./cut');
 const transcribe = require('./transcribe');
 const indexer = require('./indexer');
+const remote = require('./remote');
 const { UnavailableError } = require('./whisper');
 
 const STAGES = ['probe', 'cut', 'transcribe', 'index'];
@@ -54,12 +59,15 @@ const RUN = {
   },
   async cut(item, stages) {
     if (media.audioClass(stages.probe.meta).silent) return { status: 'skipped', meta: { reason: 'no audio' } };
+    if (remote.isRemote('cut')) return remote.run(item, 'cut');
     return cut.cutRecording(item.file_path);
   },
   async transcribe(item, stages) {
     const cls = media.audioClass(stages.probe.meta);
     if (cls.silent) return { status: 'skipped', meta: { reason: 'no audio' } };
-    return transcribe.transcribeRecording(item, { ...stages.probe.meta, ...cls });
+    const probeMeta = { ...stages.probe.meta, ...cls };
+    if (remote.isRemote('transcribe')) return remote.run(item, 'transcribe', { probeMeta });
+    return transcribe.transcribeRecording(item, probeMeta);
   },
   async index(item) {
     return indexer.indexRecording(item);
@@ -74,6 +82,7 @@ let retryTimer = null;
 const paused = new Set(); // stages waiting for the transcriber to come back
 let idleWaiters = [];
 
+const isHeavy = (stage) => HEAVY.has(stage) && !remote.isRemote(stage);
 const onDisk = (item) => !!item.file_path && fs.existsSync(path.join(config.downloadDir, item.file_path));
 const ready = (item) => item && item.kind === 'recording' && item.status === 'downloaded' && onDisk(item);
 
@@ -121,7 +130,7 @@ function sweep({ includeFailed = false } = {}) {
 function pump() {
   for (const lane of Object.values(lanes)) {
     if (lane.running || !lane.queue.length || paused.has(lane.stage)) continue;
-    const heavy = HEAVY.has(lane.stage);
+    const heavy = isHeavy(lane.stage);
     if (heavy && heavyActive >= config.heavyConcurrency) continue;
     const itemId = lane.queue.shift();
     lane.running = itemId;
@@ -221,7 +230,7 @@ function retry(itemId, stage) {
 }
 
 function status() {
-  const out = { heavyActive, heavyLimit: config.heavyConcurrency, lanes: {} };
+  const out = { compute: config.compute, heavyActive, heavyLimit: config.heavyConcurrency, lanes: {} };
   for (const lane of Object.values(lanes)) {
     const running = lane.running && store.getItem(lane.running);
     out.lanes[lane.stage] = {
@@ -229,7 +238,10 @@ function status() {
       paused: paused.has(lane.stage),
       running: running ? { id: running.id, label: label(running) } : null,
     };
+    // remote: the node job behind the running stage (queued for the node, or running on it)
+    if (running && remote.isRemote(lane.stage)) out.lanes[lane.stage].running.remote = remote.openJob(running.id, lane.stage);
   }
+  if (config.compute === 'remote') out.remote = remote.status();
   return out;
 }
 
@@ -245,6 +257,10 @@ function start({ sweepAll = true } = {}) {
   // audio extracted for transcriptions that were running when the worker last stopped
   for (const f of fs.readdirSync(config.tmpDir)) if (f.endsWith('.flac')) fs.rmSync(path.join(config.tmpDir, f), { force: true });
   events.on('downloaded', (itemId) => sweepItem(itemId, { includeFailed: true }));
+  if (config.compute === 'remote') {
+    remote.startSweeper();
+    console.log('→ Pipeline: cut and transcribe run on the compute node (COMPUTE=remote).');
+  }
   if (sweepAll) sweep({ includeFailed: true });
 }
 

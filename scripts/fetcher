@@ -6,10 +6,14 @@
 #   worker       LMS scan, downloads, cut/transcribe/index    logs/worker.log
 #   web          dashboard, player, search, MCP               logs/web.log
 #   tunnel       Cloudflare tunnel (if CLOUDFLARE_TUNNEL set) logs/tunnel.log
+#   node         compute node: cut/transcribe jobs from a hub   logs/node.log
+#
+# "all" means FETCHER_SERVICES from .env (default: transcriber worker web tunnel).
+# On a PC that is the compute node of a hub: FETCHER_SERVICES="transcriber node".
 #
 # usage: scripts/fetcher start|stop|restart [all|SERVICE...]   (default: all)
 #        scripts/fetcher status
-#        scripts/fetcher logs [SERVICE]       follow a log (default: worker + web)
+#        scripts/fetcher logs [SERVICE]       follow a log (default: worker + web, or node)
 #        scripts/fetcher dev                  web in the foreground, reloading on code changes
 #        scripts/fetcher mem [SECONDS]        sample RAM per service, print the peaks (Ctrl-C to stop)
 #
@@ -33,7 +37,9 @@ WHISPER_URL="${WHISPER_URL:-http://127.0.0.1:8000}"
 LOGS="${LOG_DIR:-logs}"; RUN="${RUN_DIR:-run}"; TMP="$(realpath -m "${DATA_DIR:-./data}")/tmp"
 mkdir -p "$LOGS" "$RUN"
 
-ALL=(transcriber worker web tunnel)   # start order; stop goes in reverse
+KNOWN=(transcriber worker web tunnel node)   # start order; stop goes in reverse
+read -r -a ALL <<< "${FETCHER_SERVICES:-transcriber worker web tunnel}"   # what "all" means here
+for s in "${ALL[@]}"; do [[ " ${KNOWN[*]} " == *" $s "* ]] || { echo "FETCHER_SERVICES: unknown service '$s' (one of: ${KNOWN[*]})"; exit 1; }; done
 
 # RAM: V8 otherwise grows a 16 MB young generation and lets the heap balloon
 # while memory is free (web: ~360 MB under load vs ~145 MB with these, same
@@ -68,6 +74,7 @@ cmd_for() {
       echo "env VENV=$venv HOST=127.0.0.1 PORT=$port transcriber/run.sh" ;;
     worker) echo "env -C server node $NODE_FLAGS worker.js" ;;
     web)    echo "env -C server node $NODE_FLAGS web.js" ;;
+    node)   echo "env -C server node $NODE_FLAGS node.js" ;;
     tunnel) echo "cloudflared tunnel --no-autoupdate run ${CLOUDFLARE_TUNNEL}" ;;
   esac
 }
@@ -81,6 +88,10 @@ check() {
         return 1
       fi ;;
     worker) for t in node ffmpeg ffprobe auto-editor; do command -v "$t" >/dev/null || { echo "Missing $t on PATH (see README → Setup)."; return 1; }; done ;;
+    node)
+      for t in node ffmpeg ffprobe auto-editor; do command -v "$t" >/dev/null || { echo "Missing $t on PATH (see README → Setup)."; return 1; }; done
+      [ -n "${HUB_URLS:-}" ] || { echo "node: set HUB_URLS in .env (e.g. http://<mac-lan-ip>:3102,https://lectures.example.com)."; return 1; }
+      [ "${#NODE_TOKEN}" -ge 32 ] || { echo "node: NODE_TOKEN must be the hub's (at least 32 characters)."; return 1; } ;;
     tunnel)
       [ -n "${CLOUDFLARE_TUNNEL:-}" ] || { echo "tunnel: CLOUDFLARE_TUNNEL is empty in .env; skipping."; return 2; }
       command -v cloudflared >/dev/null || { echo "Missing cloudflared on PATH."; return 1; } ;;
@@ -139,19 +150,21 @@ services() {  # expand "all"/empty, validate names
   [ $# -eq 0 ] && set -- all
   for s in "$@"; do
     if [ "$s" = all ]; then out+=("${ALL[@]}")
-    elif [[ " ${ALL[*]} " == *" $s "* ]]; then out+=("$s")
-    else echo "unknown service '$s' (one of: ${ALL[*]}, all)" >&2; exit 1
+    elif [[ " ${KNOWN[*]} " == *" $s "* ]]; then out+=("$s")
+    else echo "unknown service '$s' (one of: ${KNOWN[*]}, all)" >&2; exit 1
     fi
   done
   printf '%s\n' "${out[@]}"
 }
 
-in_order() { local s; for s in "${ALL[@]}"; do printf '%s\n' "$@" | grep -qx "$s" && echo "$s"; done; }
+in_order() { local s; for s in "${KNOWN[@]}"; do printf '%s\n' "$@" | grep -qx "$s" && echo "$s"; done; }
 
 status() {
   local s pid m
-  for s in "${ALL[@]}"; do
+  for s in "${KNOWN[@]}"; do
     pid="$(pid_of "$s")" || true
+    # services this machine doesn't run (not in FETCHER_SERVICES) only show while running
+    if [[ " ${ALL[*]} " != *" $s "* ]] && [ -z "$pid" ]; then continue; fi
     if [ -n "$pid" ]; then
       m="$(mem_of "$pid" "$s")" && m="  $(fmt_mb "$m")" || m=""
       printf "%-12s running (pid %s)%s\n" "$s" "$pid" "$m"
@@ -171,7 +184,10 @@ case "$cmd" in
   stop)    mapfile -t S < <(services "$@"); for s in $(in_order "${S[@]}" | tac); do stop_one "$s"; done ;;
   restart) mapfile -t S < <(services "$@"); for s in $(in_order "${S[@]}" | tac); do stop_one "$s"; done; for s in $(in_order "${S[@]}"); do start_one "$s"; done ;;
   status)  status ;;
-  logs)    if [ $# -eq 0 ]; then exec tail -n 30 -F "$LOGS/worker.log" "$LOGS/web.log"; else exec tail -n 50 -F "$LOGS/$1.log"; fi ;;
+  logs)
+    if [ $# -gt 0 ]; then exec tail -n 50 -F "$LOGS/$1.log"; fi
+    if [[ " ${ALL[*]} " == *" worker "* ]]; then exec tail -n 30 -F "$LOGS/worker.log" "$LOGS/web.log"; fi
+    exec tail -n 30 -F "$LOGS/node.log" ;;
   dev)
     if running web; then stop_one web; fi
     check web
@@ -179,5 +195,5 @@ case "$cmd" in
     rm -rf "${TMP:?}/web"; mkdir -p "$TMP/web"; export TMPDIR="$TMP/web"
     cd server && exec node $NODE_FLAGS --watch web.js ;;
   mem)     exec "$ROOT/scripts/memwatch" "$@" ;;
-  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
