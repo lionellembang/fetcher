@@ -181,8 +181,9 @@ async function upload(req, res) {
 
   // The node sends one upload at a time, so a PUT still writing this file is
   // left over from a connection that broke without the hub noticing: end it.
-  const prev = uploads.get(file);
-  if (prev) {
+  // Loop, so that of two PUTs waiting on the same one, the later one wins and
+  // two never write at once.
+  for (let prev; (prev = uploads.get(file)); ) {
     prev.req.destroy();
     await prev.done;
   }

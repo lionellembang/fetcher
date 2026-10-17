@@ -156,6 +156,26 @@ test('claim → source (resumed) → cut → upload (resumed) → complete, then
   assert.deepEqual(hub.seen.fails, []);
 });
 
+test('a large cut arrives intact (the upload stream is read only by the request)', async (t) => {
+  const BIG = crypto.randomBytes(24 * 1024 * 1024);
+  const hub = await fakeHub([cutJob(5)]);
+  t.after(hub.close);
+  const agent = agentFor(hub.base, path.join(dir, 'cache-big'), {
+    heartbeatMs: 5, // progress is measured often while the upload runs
+    cutRecording: async (rel, opts) => {
+      const out = cut.cutPaths(rel);
+      fs.mkdirSync(path.dirname(path.join(opts.downloadDir, out.video)), { recursive: true });
+      fs.writeFileSync(path.join(opts.downloadDir, out.video), BIG);
+      fs.writeFileSync(path.join(opts.downloadDir, out.timeline), TIMELINE);
+      return { outputPath: out.video, meta: { timeline: out.timeline, size: BIG.length } };
+    },
+  });
+  assert.equal(await agent.step(), true);
+  assert.equal(hub.seen.completes.length, 1, 'completed on the first try (no hash mismatch)');
+  assert.ok(hub.seen.uploads['5/video'].equals(BIG));
+  assert.deepEqual(hub.seen.fails, []);
+});
+
 test('a job the hub cancels is stopped and dropped, not completed or failed', async (t) => {
   const hub = await fakeHub([cutJob(7)], { cancel: new Set([7]) });
   t.after(hub.close);
